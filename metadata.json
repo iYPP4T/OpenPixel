@@ -1,0 +1,5 @@
+{
+  "name": "AI Pixel Color by Number",
+  "description": "An open-source web application that converts images into interactive color-by-number pixel art using AI color quantization.",
+  "requestFramePermissions": []
+}

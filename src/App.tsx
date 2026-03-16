@@ -1,0 +1,1043 @@
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { useGesture } from '@use-gesture/react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock } from 'lucide-react';
+import confetti from 'canvas-confetti';
+import { loadImage, downsampleImage } from './lib/pixelate';
+import { kMeans, mapToPalette } from './lib/quantize';
+import { OpenPixelFormat, RGB } from './lib/types';
+import { rgbToHex, getContrastColor } from './lib/utils';
+import { audio } from './lib/audio';
+
+export default function App() {
+  // --- State ---
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+  const [gridSize, setGridSize] = useState<number>(32);
+  const [colorCount, setColorCount] = useState<number | 'auto'>('auto');
+  const [useDithering, setUseDithering] = useState<boolean>(false);
+  const [useSmoothing, setUseSmoothing] = useState<boolean>(false);
+  
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [openPixelData, setOpenPixelData] = useState<OpenPixelFormat | null>(null);
+  
+  // Game State
+  const [selectedColorIdx, setSelectedColorIdx] = useState<number>(0);
+  const [filledPixels, setFilledPixels] = useState<Set<number>>(new Set());
+  const [zoom, setZoom] = useState<number>(1);
+  const [isDragging, setIsDragging] = useState(false);
+  const [showGridLines, setShowGridLines] = useState<boolean>(true);
+  const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
+  const [activeTool, setActiveTool] = useState<'draw' | 'picker' | 'pan'>('draw');
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [endTime, setEndTime] = useState<number | null>(null);
+  const [elapsedTime, setElapsedTime] = useState<number>(0);
+
+  // History State
+  const [history, setHistory] = useState<Set<number>[]>([new Set()]);
+  const [historyIndex, setHistoryIndex] = useState<number>(0);
+  const pendingChanges = useRef(false);
+
+  // --- Persistence ---
+  useEffect(() => {
+    const savedData = localStorage.getItem('openPixelSave');
+    if (savedData) {
+      try {
+        const parsed = JSON.parse(savedData);
+        if (parsed.openPixelData) {
+          setOpenPixelData(parsed.openPixelData);
+          const savedFilled = new Set<number>(parsed.filledPixels || []);
+          setFilledPixels(savedFilled);
+          setHistory([savedFilled]);
+          setHistoryIndex(0);
+          if (parsed.gridSize) setGridSize(parsed.gridSize);
+          if (parsed.colorCount) setColorCount(parsed.colorCount);
+          if (parsed.useDithering !== undefined) setUseDithering(parsed.useDithering);
+          if (parsed.useSmoothing !== undefined) setUseSmoothing(parsed.useSmoothing);
+          if (parsed.startTime) setStartTime(parsed.startTime);
+          if (parsed.endTime) setEndTime(parsed.endTime);
+        }
+      } catch (e) {
+        console.error("Failed to load save", e);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (openPixelData) {
+      localStorage.setItem('openPixelSave', JSON.stringify({
+        openPixelData,
+        filledPixels: Array.from(filledPixels),
+        gridSize,
+        colorCount,
+        useDithering,
+        useSmoothing,
+        startTime,
+        endTime
+      }));
+    }
+  }, [openPixelData, filledPixels, gridSize, colorCount, useDithering, useSmoothing, startTime, endTime]);
+
+  // --- Timer ---
+  useEffect(() => {
+    let interval: number;
+    if (startTime && !endTime) {
+      interval = window.setInterval(() => {
+        setElapsedTime(Date.now() - startTime);
+      }, 1000);
+    } else if (startTime && endTime) {
+      setElapsedTime(endTime - startTime);
+    } else {
+      setElapsedTime(0);
+    }
+    return () => window.clearInterval(interval);
+  }, [startTime, endTime]);
+
+  const formatTime = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  // --- Processing ---
+  const processImage = async (img: HTMLImageElement, size: number, colors: number | 'auto', dither: boolean, smooth: boolean) => {
+    setIsProcessing(true);
+    try {
+      // Allow UI to update before heavy processing
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
+      const aspectRatio = img.width / img.height;
+      let gridW = size;
+      let gridH = size;
+      if (aspectRatio > 1) {
+        gridH = Math.max(1, Math.round(size / aspectRatio));
+      } else {
+        gridW = Math.max(1, Math.round(size * aspectRatio));
+      }
+      
+      const pixels = downsampleImage(img, gridW, gridH);
+      
+      let finalColorCount = 16;
+      if (colors === 'auto') {
+        const uniqueColors = new Set(pixels.map(p => p.join(','))).size;
+        // Heuristic: scale color count based on unique colors in downsampled image, bounded between 8 and 24
+        finalColorCount = Math.min(24, Math.max(8, Math.round(uniqueColors / 5)));
+      } else {
+        finalColorCount = colors;
+      }
+      
+      const palette = kMeans(pixels, finalColorCount);
+      const mappedPixels = mapToPalette(pixels, palette, gridW, gridH, dither, smooth);
+      
+      setOpenPixelData({
+        version: "1.0.0",
+        width: gridW,
+        height: gridH,
+        palette,
+        pixels: mappedPixels
+      });
+      
+      const initialPixels = new Set<number>();
+      setFilledPixels(initialPixels);
+      setHistory([initialPixels]);
+      setHistoryIndex(0);
+      pendingChanges.current = false;
+      completedColorsRef.current = new Set();
+      setSelectedColorIdx(0);
+      setZoom(1);
+      setStartTime(null);
+      setEndTime(null);
+    } catch (error) {
+      console.error("Error processing image:", error);
+      alert("Failed to process image.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    try {
+      const img = await loadImage(file);
+      setImage(img);
+      processImage(img, gridSize, colorCount, useDithering, useSmoothing);
+    } catch (error) {
+      console.error("Error loading image:", error);
+      alert("Failed to load image.");
+    }
+  };
+
+  // Re-process if settings change and we have an image
+  useEffect(() => {
+    if (image) {
+      const timeoutId = setTimeout(() => {
+        processImage(image, gridSize, colorCount, useDithering, useSmoothing);
+      }, 500);
+      return () => clearTimeout(timeoutId);
+    }
+  }, [gridSize, colorCount, image, useDithering, useSmoothing]);
+
+  // --- Game Logic ---
+  const handlePixelInteract = (index: number) => {
+    if (!openPixelData) return;
+    
+    if (activeTool === 'picker') {
+      setSelectedColorIdx(openPixelData.pixels[index]);
+      setActiveTool('draw');
+      return;
+    }
+    
+    if (activeTool === 'pan') return;
+    
+    // Only fill if the selected color matches the target color
+    if (openPixelData.pixels[index] === selectedColorIdx) {
+      if (!startTime) setStartTime(Date.now());
+      
+      setFilledPixels(prev => {
+        if (prev.has(index)) return prev;
+        const next = new Set(prev);
+        next.add(index);
+        pendingChanges.current = true;
+        return next;
+      });
+      audio.playPop();
+    }
+  };
+
+  // Commit to history when dragging stops
+  useEffect(() => {
+    if (!isDragging && pendingChanges.current) {
+      const newHistory = history.slice(0, historyIndex + 1);
+      newHistory.push(filledPixels);
+      setHistory(newHistory);
+      setHistoryIndex(newHistory.length - 1);
+      pendingChanges.current = false;
+    }
+  }, [isDragging, filledPixels, history, historyIndex]);
+
+  const handleUndo = () => {
+    if (historyIndex > 0) {
+      setHistoryIndex(historyIndex - 1);
+      setFilledPixels(history[historyIndex - 1]);
+    }
+  };
+
+  const handleRedo = () => {
+    if (historyIndex < history.length - 1) {
+      setHistoryIndex(historyIndex + 1);
+      setFilledPixels(history[historyIndex + 1]);
+    }
+  };
+
+  const handleFillColor = () => {
+    if (!openPixelData) return;
+    
+    if (!startTime) setStartTime(Date.now());
+    setFilledPixels(prev => {
+      const next = new Set(prev);
+      let changed = false;
+      openPixelData.pixels.forEach((colorIdx, index) => {
+        if (colorIdx === selectedColorIdx && !next.has(index)) {
+          next.add(index);
+          changed = true;
+        }
+      });
+      
+      if (changed) {
+        const newHistory = history.slice(0, historyIndex + 1);
+        newHistory.push(next);
+        setHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+        audio.playPop();
+      }
+      return next;
+    });
+  };
+
+  const handleFillAll = () => {
+    if (!openPixelData) return;
+    
+    if (!startTime) setStartTime(Date.now());
+    setFilledPixels(prev => {
+      const next = new Set(openPixelData.pixels.map((_, i) => i));
+      if (next.size !== prev.size) {
+        const newHistory = history.slice(0, historyIndex + 1);
+        newHistory.push(next);
+        setHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+        audio.playPop();
+      }
+      return next;
+    });
+  };
+
+  const handleClearAll = () => {
+    if (!openPixelData) return;
+    
+    setFilledPixels(prev => {
+      if (prev.size > 0) {
+        const next = new Set<number>();
+        const newHistory = history.slice(0, historyIndex + 1);
+        newHistory.push(next);
+        setHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+        setStartTime(null);
+        setEndTime(null);
+        completedColorsRef.current = new Set();
+        return next;
+      }
+      return prev;
+    });
+  };
+
+  const handleHint = () => {
+    if (!openPixelData) return;
+    
+    const unfilled: number[] = [];
+    openPixelData.pixels.forEach((colorIdx, index) => {
+      if (colorIdx === selectedColorIdx && !filledPixels.has(index)) {
+        unfilled.push(index);
+      }
+    });
+    
+    if (unfilled.length > 0) {
+      if (!startTime) setStartTime(Date.now());
+      const randomIdx = unfilled[Math.floor(Math.random() * unfilled.length)];
+      setFilledPixels(prev => {
+        const next = new Set(prev);
+        next.add(randomIdx);
+        const newHistory = history.slice(0, historyIndex + 1);
+        newHistory.push(next);
+        setHistory(newHistory);
+        setHistoryIndex(newHistory.length - 1);
+        audio.playPop();
+        return next;
+      });
+    }
+  };
+
+  // Keyboard shortcuts for Tools and Undo/Redo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.target instanceof HTMLElement && e.target.tagName !== 'INPUT') {
+        switch(e.key.toLowerCase()) {
+          case 'b': setActiveTool('draw'); break;
+          case 'v': setActiveTool('pan'); break;
+          case 'i': setActiveTool('picker'); break;
+          case 'f': handleFillColor(); break;
+          case 'h': handleHint(); break;
+          case 'c': handleClearAll(); break;
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [history, historyIndex, activeTool, selectedColorIdx, openPixelData, filledPixels]);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useGesture(
+    {
+      onDrag: ({ offset: [x, y], memo, active }) => {
+        if (activeTool !== 'pan') return memo;
+        if (containerRef.current) {
+          if (memo) {
+            containerRef.current.scrollLeft -= x - memo[0];
+            containerRef.current.scrollTop -= y - memo[1];
+          }
+        }
+        return [x, y];
+      },
+      onPinch: ({ offset: [d] }) => {
+        setZoom(d);
+      },
+      onWheel: ({ event, delta: [dx, dy], ctrlKey }) => {
+        if (ctrlKey) {
+          event.preventDefault();
+          setZoom(z => Math.max(0.1, Math.min(5, z - dy * 0.01)));
+        } else if (containerRef.current) {
+          containerRef.current.scrollLeft += dx;
+          containerRef.current.scrollTop += dy;
+        }
+      }
+    },
+    {
+      target: containerRef,
+      drag: { filterTaps: true },
+      pinch: { scaleBounds: { min: 0.1, max: 5 }, modifierKey: 'ctrlKey' },
+      wheel: { eventOptions: { passive: false } }
+    }
+  );
+
+  const handlePointerDown = (index: number) => {
+    setIsDragging(true);
+    handlePixelInteract(index);
+  };
+
+  const handlePointerEnter = (index: number) => {
+    if (isDragging) {
+      handlePixelInteract(index);
+    }
+  };
+
+  const handlePointerUp = () => {
+    setIsDragging(false);
+  };
+
+  useEffect(() => {
+    window.addEventListener('pointerup', handlePointerUp);
+    return () => window.removeEventListener('pointerup', handlePointerUp);
+  }, []);
+
+  // --- Derived State ---
+  const colorProgress = useMemo(() => {
+    if (!openPixelData) return [];
+    
+    const counts = new Array(openPixelData.palette.length).fill(0);
+    const filled = new Array(openPixelData.palette.length).fill(0);
+    
+    openPixelData.pixels.forEach((colorIdx, i) => {
+      counts[colorIdx]++;
+      if (filledPixels.has(i)) {
+        filled[colorIdx]++;
+      }
+    });
+    
+    return counts.map((total, idx) => ({
+      total,
+      filled: filled[idx],
+      isComplete: total > 0 && total === filled[idx]
+    }));
+  }, [openPixelData, filledPixels]);
+
+  const isLevelComplete = useMemo(() => {
+    if (!openPixelData) return false;
+    return filledPixels.size === openPixelData.pixels.length && openPixelData.pixels.length > 0;
+  }, [openPixelData, filledPixels]);
+
+  const completedColorsRef = useRef<Set<number>>(new Set());
+
+  // Sync completedColorsRef with colorProgress (handles undo/redo)
+  useEffect(() => {
+    colorProgress.forEach((p, idx) => {
+      if (!p.isComplete && completedColorsRef.current.has(idx)) {
+        completedColorsRef.current.delete(idx);
+      } else if (p.isComplete && !completedColorsRef.current.has(idx)) {
+        // We don't add it here because we want the chime to play in the other effect
+        // But if it's already complete on load, we should add it
+      }
+    });
+  }, [colorProgress]);
+
+  // Auto-switch color when current is complete
+  useEffect(() => {
+    if (!openPixelData || selectedColorIdx === null) return;
+    const currentProgress = colorProgress[selectedColorIdx];
+    if (currentProgress && currentProgress.isComplete) {
+      if (!completedColorsRef.current.has(selectedColorIdx)) {
+        completedColorsRef.current.add(selectedColorIdx);
+        if (!isLevelComplete) {
+          audio.playChime();
+        }
+      }
+      const nextColorIdx = colorProgress.findIndex(p => !p.isComplete && p.total > 0);
+      if (nextColorIdx !== -1 && nextColorIdx !== selectedColorIdx) {
+        setSelectedColorIdx(nextColorIdx);
+      }
+    }
+  }, [colorProgress, selectedColorIdx, openPixelData, isLevelComplete]);
+
+  // Confetti on complete
+  useEffect(() => {
+    if (isLevelComplete) {
+      audio.playFanfare();
+      if (!endTime) setEndTime(Date.now());
+      confetti({
+        particleCount: 150,
+        spread: 70,
+        origin: { y: 0.6 },
+        colors: ['#6366f1', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b']
+      });
+    }
+  }, [isLevelComplete, endTime]);
+
+  // --- Export ---
+  const exportOpenPixel = () => {
+    if (!openPixelData) return;
+    
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(openPixelData, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "design.openpixel.json");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  };
+
+  const exportImage = (format: 'png' | 'jpeg' | 'webp') => {
+    if (!openPixelData) return;
+    
+    const canvas = document.createElement('canvas');
+    const scale = 30; // Export at a higher resolution
+    canvas.width = openPixelData.width * scale;
+    canvas.height = openPixelData.height * scale;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    if (showGridLines) {
+      ctx.fillStyle = theme === 'dark' ? '#27272a' : '#e4e4e7'; // zinc-800 / zinc-200
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    } else if (format === 'jpeg') {
+      ctx.fillStyle = theme === 'dark' ? '#18181b' : '#ffffff'; // zinc-900 / white
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    const gap = showGridLines ? 1 : 0;
+
+    openPixelData.pixels.forEach((colorIdx, i) => {
+      const x = (i % openPixelData.width) * scale;
+      const y = Math.floor(i / openPixelData.width) * scale;
+      
+      const isFilled = filledPixels.has(i);
+      if (isFilled) {
+        const rgb = openPixelData.palette[colorIdx];
+        ctx.fillStyle = rgbToHex(rgb);
+      } else {
+        ctx.fillStyle = theme === 'dark' ? '#18181b' : '#ffffff'; // zinc-900 / white
+      }
+      ctx.fillRect(x, y, scale - gap, scale - gap);
+
+      if (!isFilled) {
+        const isTargetColor = selectedColorIdx === colorIdx;
+        ctx.fillStyle = isTargetColor ? (theme === 'dark' ? '#d4d4d8' : '#3f3f46') : (theme === 'dark' ? '#71717a' : '#a1a1aa');
+        ctx.font = `bold ${scale * 0.4}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText((colorIdx + 1).toString(), x + (scale - gap) / 2, y + (scale - gap) / 2);
+      }
+    });
+
+    const dataUrl = canvas.toDataURL(`image/${format}`, 0.9);
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataUrl);
+    downloadAnchorNode.setAttribute("download", `pixel-art.${format}`);
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  };
+
+  return (
+    <div className={`min-h-screen font-sans selection:bg-indigo-500/30 flex flex-col ${theme === 'dark' ? 'dark bg-zinc-950 text-zinc-100' : 'bg-zinc-50 text-zinc-900'}`}>
+      {/* Header */}
+      <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white/50 dark:bg-zinc-900/50 backdrop-blur-md sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded bg-indigo-500 flex items-center justify-center">
+              <ImageIcon className="w-5 h-5 text-white" />
+            </div>
+            <h1 className="font-semibold text-lg tracking-tight">OpenPixel</h1>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            {startTime && (
+              <div className="flex items-center gap-2 text-zinc-500 dark:text-zinc-400 font-mono text-sm bg-white/50 dark:bg-zinc-800/50 px-3 py-1.5 rounded-md border border-zinc-200 dark:border-zinc-700">
+                <Clock className="w-4 h-4" />
+                {formatTime(elapsedTime)}
+              </div>
+            )}
+            <button
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              className="p-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white transition-colors"
+              title="Toggle Theme"
+            >
+              {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            </button>
+            {openPixelData && (
+              <div className="relative">
+                <button 
+                  onClick={() => setShowExportMenu(!showExportMenu)}
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 hover:bg-zinc-100 dark:hover:text-white dark:hover:bg-zinc-800 rounded-md transition-colors"
+                  title="Export Options"
+                >
+                  <Download className="w-4 h-4" />
+                  <span className="hidden sm:inline">Export</span>
+                  <ChevronDown className="w-3 h-3" />
+                </button>
+                
+                {showExportMenu && (
+                  <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md shadow-xl z-50 overflow-hidden">
+                    <button onClick={() => { exportOpenPixel(); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as OpenPixel JSON format">OpenPixel JSON</button>
+                    <button onClick={() => { exportImage('png'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as PNG image">Image (PNG)</button>
+                    <button onClick={() => { exportImage('jpeg'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as JPEG image">Image (JPEG)</button>
+                    <button onClick={() => { exportImage('webp'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as WebP image">Image (WebP)</button>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            <label 
+              className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-md cursor-pointer transition-colors shadow-sm"
+              title="Upload a new image to start a project"
+            >
+              <Upload className="w-4 h-4" />
+              <span>Upload Image</span>
+              <input 
+                type="file" 
+                accept="image/*" 
+                className="hidden" 
+                onChange={handleFileUpload}
+              />
+            </label>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+        
+        {/* Sidebar Settings */}
+        <aside className="w-full lg:w-64 border-b lg:border-b-0 lg:border-r border-zinc-200 dark:border-zinc-800 bg-white/30 dark:bg-zinc-900/30 p-4 flex flex-col gap-6 overflow-y-auto shrink-0">
+          <div>
+            <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+              <Settings2 className="w-4 h-4" />
+              Engine Settings
+            </h2>
+            
+            <div className="space-y-5">
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Grid Size</label>
+                  <span className="text-xs text-zinc-500 font-mono">{gridSize}x{gridSize}</span>
+                </div>
+                <input 
+                  type="range" 
+                  min="16" max="64" step="8"
+                  value={gridSize}
+                  onChange={(e) => setGridSize(Number(e.target.value))}
+                  className="w-full accent-indigo-500"
+                  title="Adjust the resolution of the pixel grid"
+                />
+              </div>
+              
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Color Palette</label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setColorCount('auto')}
+                      className={`text-[10px] px-2 py-0.5 rounded uppercase font-bold transition-colors ${colorCount === 'auto' ? 'bg-indigo-500 text-white' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700'}`}
+                      title="Automatically determine the best number of colors"
+                    >
+                      Auto
+                    </button>
+                    <span className="text-xs text-zinc-500 font-mono w-16 text-right">
+                      {colorCount === 'auto' ? 'Auto' : `${colorCount} colors`}
+                    </span>
+                  </div>
+                </div>
+                <input 
+                  type="range" 
+                  min="8" max="32" step="4"
+                  value={colorCount === 'auto' ? 16 : colorCount}
+                  onChange={(e) => setColorCount(Number(e.target.value))}
+                  className={`w-full accent-indigo-500 transition-opacity ${colorCount === 'auto' ? 'opacity-50' : ''}`}
+                  title="Adjust the number of colors in the generated palette"
+                />
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Show Grid Lines</label>
+                  <button
+                    onClick={() => setShowGridLines(!showGridLines)}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showGridLines ? 'bg-indigo-500' : 'bg-zinc-300 dark:bg-zinc-700'}`}
+                    title="Toggle the visibility of grid lines on the canvas"
+                  >
+                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${showGridLines ? 'translate-x-5' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Dithering</label>
+                  <button
+                    onClick={() => setUseDithering(!useDithering)}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${useDithering ? 'bg-indigo-500' : 'bg-zinc-300 dark:bg-zinc-700'}`}
+                    title="Apply Floyd-Steinberg dithering for smoother gradients"
+                  >
+                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${useDithering ? 'translate-x-5' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Smoothing</label>
+                  <button
+                    onClick={() => setUseSmoothing(!useSmoothing)}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${useSmoothing ? 'bg-indigo-500' : 'bg-zinc-300 dark:bg-zinc-700'}`}
+                    title="Apply a median filter to remove stray pixels"
+                  >
+                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${useSmoothing ? 'translate-x-5' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {openPixelData && (
+            <div className="mt-auto pt-4 border-t border-zinc-200 dark:border-zinc-800 flex flex-col gap-4">
+              {/* Minimap */}
+              <div className="w-full aspect-square bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md overflow-hidden relative">
+                <div 
+                  className="absolute inset-0 grid"
+                  style={{
+                    gridTemplateColumns: `repeat(${openPixelData.width}, 1fr)`,
+                    gridTemplateRows: `repeat(${openPixelData.height}, 1fr)`,
+                  }}
+                >
+                  {openPixelData.pixels.map((colorIdx, i) => {
+                    const isFilled = filledPixels.has(i);
+                    const rgb = openPixelData.palette[colorIdx];
+                    const hexColor = rgbToHex(rgb);
+                    return (
+                      <div 
+                        key={`mini-${i}`} 
+                        style={{ backgroundColor: isFilled ? hexColor : (theme === 'dark' ? '#18181b' : '#ffffff') }}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-zinc-500 dark:text-zinc-400">Progress</span>
+                  <span className="font-mono text-indigo-500 dark:text-indigo-400">
+                    {Math.round((filledPixels.size / openPixelData.pixels.length) * 100)}%
+                  </span>
+                </div>
+                <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full mt-2 overflow-hidden">
+                  <motion.div 
+                    className="h-full bg-indigo-500"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${(filledPixels.size / openPixelData.pixels.length) * 100}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </aside>
+
+        {/* Game Area */}
+        <section className="flex-1 relative bg-zinc-100 dark:bg-zinc-950 overflow-hidden flex flex-col">
+          {/* Toolbar */}
+          {openPixelData && (
+            <div className="h-14 border-b border-zinc-200 dark:border-zinc-800/50 flex items-center justify-end px-4 gap-3 bg-white/30 dark:bg-zinc-900/30 shrink-0">
+              {/* Tools */}
+              <div className="flex bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-sm overflow-hidden">
+                <button 
+                  onClick={() => setActiveTool('draw')}
+                  className={`p-2 transition-colors ${activeTool === 'draw' ? 'bg-indigo-500 text-white' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
+                  title="Draw Tool (Click to fill pixels)"
+                >
+                  <Pen className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={() => setActiveTool('pan')}
+                  className={`p-2 transition-colors ${activeTool === 'pan' ? 'bg-indigo-500 text-white' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
+                  title="Pan Tool (Drag to move around)"
+                >
+                  <Hand className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={() => setActiveTool('picker')}
+                  className={`p-2 transition-colors ${activeTool === 'picker' ? 'bg-indigo-500 text-white' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
+                  title="Color Picker (Select a color from the grid)"
+                >
+                  <Pipette className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={handleFillColor}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                  title="Fill Color (Auto-fill all pixels of the selected color)"
+                >
+                  <PaintBucket className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Actions */}
+              <div className="flex bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-sm overflow-hidden">
+                <button 
+                  onClick={handleHint}
+                  className="p-2 text-zinc-500 hover:text-amber-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-amber-400 dark:hover:bg-zinc-800 transition-colors"
+                  title="Hint (Fills one random pixel of the selected color)"
+                >
+                  <Lightbulb className="w-4 h-4" />
+                </button>
+                <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
+                <button 
+                  onClick={handleFillAll}
+                  className="p-2 text-zinc-500 hover:text-indigo-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-indigo-400 dark:hover:bg-zinc-800 transition-colors"
+                  title="Fill Entire Image (Completes the puzzle)"
+                >
+                  <Wand2 className="w-4 h-4" />
+                </button>
+                <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
+                <button 
+                  onClick={handleClearAll}
+                  className="p-2 text-zinc-500 hover:text-red-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-red-400 dark:hover:bg-zinc-800 transition-colors"
+                  title="Clear All (Resets the board)"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Undo/Redo */}
+              <div className="flex bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-sm overflow-hidden">
+                <button 
+                  onClick={handleUndo}
+                  disabled={historyIndex <= 0}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                  title="Undo (Ctrl+Z)"
+                >
+                  <Undo className="w-4 h-4" />
+                </button>
+                <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
+                <button 
+                  onClick={handleRedo}
+                  disabled={historyIndex >= history.length - 1}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                  title="Redo (Ctrl+Y)"
+                >
+                  <Redo className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Zoom Controls */}
+              <div className="flex bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-sm overflow-hidden">
+                <button 
+                  onClick={() => setZoom(z => Math.max(0.1, z - 0.25))}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                  title="Zoom Out"
+                >
+                  <ZoomOut className="w-4 h-4" />
+                </button>
+                <div className="px-2 py-2 text-xs font-mono text-zinc-500 border-x border-zinc-200 dark:border-zinc-800 flex items-center justify-center min-w-[3rem]">
+                  {Math.round(zoom * 100)}%
+                </div>
+                <button 
+                  onClick={() => setZoom(z => Math.min(5, z + 0.25))}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                  title="Zoom In"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Grid Container */}
+          <div 
+            ref={containerRef}
+            className={`flex-1 overflow-auto flex items-center justify-center p-4 sm:p-8 ${activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing touch-none' : 'touch-none'}`}
+          >
+            {isProcessing ? (
+              <div className="flex flex-col items-center gap-4 text-zinc-500">
+                <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                <p className="text-sm font-medium animate-pulse">Quantizing colors...</p>
+              </div>
+            ) : !openPixelData ? (
+              <div className="text-center max-w-sm">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center shadow-sm">
+                  <ImageIcon className="w-8 h-8 text-zinc-400 dark:text-zinc-600" />
+                </div>
+                <h3 className="text-lg font-medium text-zinc-900 dark:text-zinc-300 mb-2">No Image Loaded</h3>
+                <p className="text-sm text-zinc-500">Upload an image to generate a color-by-number pixel grid.</p>
+              </div>
+            ) : (
+              <motion.div 
+                className="relative select-none"
+                style={{ 
+                  display: 'grid',
+                  gridTemplateColumns: `repeat(${openPixelData.width}, 1fr)`,
+                  gridTemplateRows: `repeat(${openPixelData.height}, 1fr)`,
+                  gap: showGridLines ? '1px' : '0px',
+                  backgroundColor: showGridLines ? (theme === 'dark' ? '#27272a' : '#e4e4e7') : 'transparent',
+                  border: showGridLines ? `1px solid ${theme === 'dark' ? '#27272a' : '#e4e4e7'}` : 'none'
+                }}
+                animate={{ 
+                  width: openPixelData.width * 24 * zoom, 
+                  height: openPixelData.height * 24 * zoom,
+                }}
+                transition={{ type: "spring", bounce: 0, duration: 0.4 }}
+                layout
+              >
+                {openPixelData.pixels.map((colorIdx, i) => {
+                  const isFilled = filledPixels.has(i);
+                  const isTargetColor = selectedColorIdx === colorIdx;
+                  const rgb = openPixelData.palette[colorIdx];
+                  const hexColor = rgbToHex(rgb);
+                  
+                  return (
+                    <div
+                      key={i}
+                      onPointerDown={(e) => {
+                        if (activeTool === 'pan') return;
+                        e.preventDefault();
+                        handlePointerDown(i);
+                      }}
+                      onPointerEnter={() => {
+                        if (activeTool === 'pan') return;
+                        handlePointerEnter(i);
+                      }}
+                      className={`relative flex items-center justify-center transition-all duration-300 ${activeTool === 'picker' ? 'cursor-pointer' : activeTool === 'pan' ? 'pointer-events-none' : 'cursor-crosshair'} ${!isFilled && isTargetColor ? 'animate-pulse ring-1 ring-inset ring-indigo-500/50' : ''}`}
+                      style={{
+                        backgroundColor: isFilled ? hexColor : (theme === 'dark' ? '#18181b' : '#ffffff'),
+                        transform: isFilled ? 'scale(1)' : 'scale(0.95)',
+                        opacity: isFilled ? 1 : 0.9,
+                      }}
+                    >
+                      {!isFilled && (
+                        <span 
+                          className={`text-[10px] sm:text-xs font-mono font-bold select-none pointer-events-none ${
+                            isTargetColor ? (theme === 'dark' ? 'text-zinc-300' : 'text-zinc-600') : (theme === 'dark' ? 'text-zinc-700' : 'text-zinc-300')
+                          }`}
+                          style={{
+                            transform: `scale(${Math.min(1, zoom)})`,
+                            transition: 'transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+                          }}
+                        >
+                          {colorIdx + 1}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </motion.div>
+            )}
+          </div>
+
+          {/* Palette Dock */}
+          {openPixelData && (
+            <div className="bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 p-4 shrink-0 overflow-x-auto">
+              <div className="max-w-4xl mx-auto min-w-max">
+                <div className="flex flex-wrap gap-2 justify-center">
+                  {openPixelData.palette.map((rgb, idx) => {
+                    const hexColor = rgbToHex(rgb);
+                    const contrastColor = getContrastColor(rgb);
+                    const progress = colorProgress[idx];
+                    const isSelected = selectedColorIdx === idx;
+                    
+                    if (progress.total === 0) return null;
+
+                    return (
+                      <button
+                        key={idx}
+                        onClick={() => {
+                          setSelectedColorIdx(idx);
+                          if (activeTool === 'picker') setActiveTool('draw');
+                        }}
+                        className={`
+                          relative w-10 h-10 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center font-mono text-sm font-bold
+                          transition-all duration-200 overflow-hidden group shrink-0
+                          ${isSelected ? 'ring-2 ring-indigo-500 dark:ring-white ring-offset-2 ring-offset-white dark:ring-offset-zinc-900 scale-110 z-10' : 'hover:scale-105 opacity-90 hover:opacity-100'}
+                          ${progress.isComplete ? 'opacity-50 grayscale' : ''}
+                        `}
+                        style={{ 
+                          backgroundColor: hexColor,
+                          color: contrastColor
+                        }}
+                        title={`Select color ${idx + 1}`}
+                      >
+                        {/* Progress Background */}
+                        {!progress.isComplete && (
+                          <div 
+                            className="absolute bottom-0 left-0 right-0 bg-black/20 transition-all duration-300"
+                            style={{ height: `${(progress.filled / progress.total) * 100}%` }}
+                          />
+                        )}
+                        
+                        <span className="relative z-10">
+                          {progress.isComplete ? <Check className="w-5 h-5" /> : idx + 1}
+                        </span>
+
+                        {!progress.isComplete && (
+                          <span className="absolute top-0 right-0 bg-black/40 text-white text-[9px] px-1 rounded-bl-md font-sans leading-tight">
+                            {progress.total - progress.filled}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+      </main>
+
+      {/* Level Complete Overlay */}
+      <AnimatePresence>
+        {isLevelComplete && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/80 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-8 rounded-2xl shadow-2xl text-center max-w-md w-full mx-4"
+            >
+              <div className="w-20 h-20 mx-auto bg-emerald-500/20 text-emerald-600 dark:text-emerald-500 rounded-full flex items-center justify-center mb-6">
+                <Check className="w-10 h-10" />
+              </div>
+              <h2 className="text-3xl font-bold text-zinc-900 dark:text-white mb-2">Masterpiece!</h2>
+              <p className="text-zinc-500 dark:text-zinc-400 mb-8">You've successfully colored all the pixels.</p>
+              
+              <div className="flex gap-4 justify-center">
+                <button 
+                  onClick={() => exportImage('png')}
+                  className="px-6 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-900 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-white font-medium rounded-xl transition-colors flex items-center gap-2"
+                  title="Export completed design as PNG"
+                >
+                  <Download className="w-5 h-5" />
+                  Export Image
+                </button>
+                <label 
+                  className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-colors cursor-pointer flex items-center gap-2"
+                  title="Upload a new image to start a project"
+                >
+                  <Upload className="w-5 h-5" />
+                  New Image
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    className="hidden" 
+                    onChange={handleFileUpload}
+                  />
+                </label>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
