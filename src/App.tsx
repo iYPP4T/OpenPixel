@@ -1,13 +1,15 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
 import { OpenPixelFormat, RGB } from './lib/types';
 import { rgbToHex, getContrastColor } from './lib/utils';
 import { audio } from './lib/audio';
+import { PaletteName, PRESET_PALETTES } from './lib/palettes';
+import { GALLERY_ITEMS, GalleryItem } from './lib/gallery';
 
 export default function App() {
   // --- State ---
@@ -16,6 +18,7 @@ export default function App() {
   const [colorCount, setColorCount] = useState<number | 'auto'>('auto');
   const [useDithering, setUseDithering] = useState<boolean>(false);
   const [useSmoothing, setUseSmoothing] = useState<boolean>(false);
+  const [selectedPalette, setSelectedPalette] = useState<PaletteName>('auto');
   
   const [isProcessing, setIsProcessing] = useState(false);
   const [openPixelData, setOpenPixelData] = useState<OpenPixelFormat | null>(null);
@@ -27,7 +30,8 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [showGridLines, setShowGridLines] = useState<boolean>(true);
   const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
-  const [activeTool, setActiveTool] = useState<'draw' | 'picker' | 'pan'>('draw');
+  const [showGallery, setShowGallery] = useState<boolean>(false);
+  const [activeTool, setActiveTool] = useState<'draw' | 'picker' | 'pan' | 'wand' | 'eraser'>('draw');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [startTime, setStartTime] = useState<number | null>(null);
   const [endTime, setEndTime] = useState<number | null>(null);
@@ -101,7 +105,7 @@ export default function App() {
   };
 
   // --- Processing ---
-  const processImage = async (img: HTMLImageElement, size: number, colors: number | 'auto', dither: boolean, smooth: boolean) => {
+  const processImage = async (img: HTMLImageElement, size: number, colors: number | 'auto', dither: boolean, smooth: boolean, paletteName: PaletteName) => {
     setIsProcessing(true);
     try {
       // Allow UI to update before heavy processing
@@ -119,15 +123,21 @@ export default function App() {
       const pixels = downsampleImage(img, gridW, gridH);
       
       let finalColorCount = 16;
-      if (colors === 'auto') {
-        const uniqueColors = new Set(pixels.map(p => p.join(','))).size;
-        // Heuristic: scale color count based on unique colors in downsampled image, bounded between 8 and 24
-        finalColorCount = Math.min(24, Math.max(8, Math.round(uniqueColors / 5)));
+      let palette: RGB[];
+      
+      if (paletteName !== 'auto') {
+        palette = PRESET_PALETTES[paletteName];
       } else {
-        finalColorCount = colors;
+        if (colors === 'auto') {
+          const uniqueColors = new Set(pixels.map(p => p.join(','))).size;
+          // Heuristic: scale color count based on unique colors in downsampled image, bounded between 8 and 24
+          finalColorCount = Math.min(24, Math.max(8, Math.round(uniqueColors / 5)));
+        } else {
+          finalColorCount = colors;
+        }
+        palette = kMeans(pixels, finalColorCount);
       }
       
-      const palette = kMeans(pixels, finalColorCount);
       const mappedPixels = mapToPalette(pixels, palette, gridW, gridH, dither, smooth);
       
       setOpenPixelData({
@@ -163,10 +173,34 @@ export default function App() {
     try {
       const img = await loadImage(file);
       setImage(img);
-      processImage(img, gridSize, colorCount, useDithering, useSmoothing);
+      processImage(img, gridSize, colorCount, useDithering, useSmoothing, selectedPalette);
     } catch (error) {
       console.error("Error loading image:", error);
       alert("Failed to load image.");
+    }
+  };
+
+  const loadGalleryItem = async (item: GalleryItem) => {
+    setIsProcessing(true);
+    setShowGallery(false);
+    try {
+      const response = await fetch(item.url);
+      const blob = await response.blob();
+      const file = new File([blob], `${item.id}.jpg`, { type: blob.type });
+      const img = await loadImage(file);
+      setImage(img);
+      
+      // Set appropriate grid size based on difficulty
+      let newGridSize = 32;
+      if (item.difficulty === 'easy') newGridSize = 16;
+      if (item.difficulty === 'hard') newGridSize = 48;
+      setGridSize(newGridSize);
+      
+      processImage(img, newGridSize, colorCount, useDithering, useSmoothing, selectedPalette);
+    } catch (error) {
+      console.error("Error loading gallery item:", error);
+      alert("Failed to load gallery image.");
+      setIsProcessing(false);
     }
   };
 
@@ -174,11 +208,11 @@ export default function App() {
   useEffect(() => {
     if (image) {
       const timeoutId = setTimeout(() => {
-        processImage(image, gridSize, colorCount, useDithering, useSmoothing);
+        processImage(image, gridSize, colorCount, useDithering, useSmoothing, selectedPalette);
       }, 500);
       return () => clearTimeout(timeoutId);
     }
-  }, [gridSize, colorCount, image, useDithering, useSmoothing]);
+  }, [gridSize, colorCount, image, useDithering, useSmoothing, selectedPalette]);
 
   // --- Game Logic ---
   const handlePixelInteract = (index: number) => {
@@ -191,6 +225,56 @@ export default function App() {
     }
     
     if (activeTool === 'pan') return;
+
+    if (activeTool === 'eraser') {
+      setFilledPixels(prev => {
+        if (!prev.has(index)) return prev;
+        const next = new Set(prev);
+        next.delete(index);
+        pendingChanges.current = true;
+        return next;
+      });
+      return;
+    }
+
+    if (activeTool === 'wand') {
+      const targetColorIdx = openPixelData.pixels[index];
+      if (targetColorIdx !== selectedColorIdx) return;
+      if (!startTime) setStartTime(Date.now());
+
+      setFilledPixels(prev => {
+        if (prev.has(index)) return prev;
+        const next = new Set(prev);
+        
+        const width = openPixelData.width;
+        const height = openPixelData.height;
+        const visited = new Set<number>();
+        const queue = [index];
+
+        while (queue.length > 0) {
+          const idx = queue.shift()!;
+          if (visited.has(idx)) continue;
+          visited.add(idx);
+
+          if (openPixelData.pixels[idx] === targetColorIdx && !next.has(idx)) {
+            next.add(idx);
+            
+            const x = idx % width;
+            const y = Math.floor(idx / width);
+
+            if (x > 0) queue.push(idx - 1);
+            if (x < width - 1) queue.push(idx + 1);
+            if (y > 0) queue.push(idx - width);
+            if (y < height - 1) queue.push(idx + width);
+          }
+        }
+        
+        pendingChanges.current = true;
+        audio.playPop();
+        return next;
+      });
+      return;
+    }
     
     // Only fill if the selected color matches the target color
     if (openPixelData.pixels[index] === selectedColorIdx) {
@@ -337,6 +421,8 @@ export default function App() {
           case 'b': setActiveTool('draw'); break;
           case 'v': setActiveTool('pan'); break;
           case 'i': setActiveTool('picker'); break;
+          case 'w': setActiveTool('wand'); break;
+          case 'e': setActiveTool('eraser'); break;
           case 'f': handleFillColor(); break;
           case 'h': handleHint(); break;
           case 'c': handleClearAll(); break;
@@ -520,7 +606,7 @@ export default function App() {
       }
       ctx.fillRect(x, y, scale - gap, scale - gap);
 
-      if (!isFilled) {
+      if (!isFilled && zoom >= 0.8) {
         const isTargetColor = selectedColorIdx === colorIdx;
         ctx.fillStyle = isTargetColor ? (theme === 'dark' ? '#d4d4d8' : '#3f3f46') : (theme === 'dark' ? '#71717a' : '#a1a1aa');
         ctx.font = `bold ${scale * 0.4}px monospace`;
@@ -537,6 +623,71 @@ export default function App() {
     document.body.appendChild(downloadAnchorNode);
     downloadAnchorNode.click();
     downloadAnchorNode.remove();
+  };
+
+  const exportTimelapse = async () => {
+    if (!openPixelData || history.length === 0) return;
+    setIsProcessing(true);
+    
+    try {
+      // Dynamic import to avoid loading gif.js until needed
+      const GIF = (await import('gif.js')).default;
+      
+      const gif = new GIF({
+        workers: 2,
+        quality: 10,
+        width: openPixelData.width * 10,
+        height: openPixelData.height * 10,
+        workerScript: '/gif.worker.js' // We need to ensure this exists, or use a blob worker
+      });
+
+      const canvas = document.createElement('canvas');
+      const scale = 10;
+      canvas.width = openPixelData.width * scale;
+      canvas.height = openPixelData.height * scale;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Render each history state as a frame
+      for (let h = 0; h <= historyIndex; h++) {
+        const state = history[h];
+        
+        ctx.fillStyle = theme === 'dark' ? '#18181b' : '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        openPixelData.pixels.forEach((colorIdx, i) => {
+          const x = (i % openPixelData.width) * scale;
+          const y = Math.floor(i / openPixelData.width) * scale;
+          
+          if (state.has(i)) {
+            const rgb = openPixelData.palette[colorIdx];
+            ctx.fillStyle = rgbToHex(rgb);
+            ctx.fillRect(x, y, scale, scale);
+          }
+        });
+
+        // Add frame to gif (delay in ms)
+        gif.addFrame(ctx, {copy: true, delay: h === historyIndex ? 2000 : 100});
+      }
+
+      gif.on('finished', (blob: Blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'timelapse.gif';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setIsProcessing(false);
+      });
+
+      gif.render();
+    } catch (error) {
+      console.error("Failed to generate timelapse:", error);
+      alert("Failed to generate timelapse. Please try again.");
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -565,6 +716,14 @@ export default function App() {
             >
               {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
+            <button
+              onClick={() => setShowGallery(true)}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 hover:bg-zinc-100 dark:hover:text-white dark:hover:bg-zinc-800 rounded-md transition-colors"
+              title="Open Gallery"
+            >
+              <Library className="w-4 h-4" />
+              <span className="hidden sm:inline">Gallery</span>
+            </button>
             {openPixelData && (
               <div className="relative">
                 <button 
@@ -583,6 +742,7 @@ export default function App() {
                     <button onClick={() => { exportImage('png'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as PNG image">Image (PNG)</button>
                     <button onClick={() => { exportImage('jpeg'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as JPEG image">Image (JPEG)</button>
                     <button onClick={() => { exportImage('webp'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as WebP image">Image (WebP)</button>
+                    <button onClick={() => { exportTimelapse(); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export timelapse as GIF">Timelapse (GIF)</button>
                   </div>
                 )}
               </div>
@@ -656,6 +816,23 @@ export default function App() {
                   className={`w-full accent-indigo-500 transition-opacity ${colorCount === 'auto' ? 'opacity-50' : ''}`}
                   title="Adjust the number of colors in the generated palette"
                 />
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Palette</label>
+                  <select
+                    value={selectedPalette}
+                    onChange={(e) => setSelectedPalette(e.target.value as PaletteName)}
+                    className="text-sm bg-zinc-100 dark:bg-zinc-800 border-none rounded-md px-2 py-1 text-zinc-700 dark:text-zinc-300 focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="auto">Auto (K-Means)</option>
+                    <option value="gameboy">Gameboy</option>
+                    <option value="nes">NES</option>
+                    <option value="c64">Commodore 64</option>
+                    <option value="pico8">PICO-8</option>
+                  </select>
+                </div>
               </div>
 
               <div className="space-y-2 pt-2 border-t border-zinc-200 dark:border-zinc-800/50">
@@ -758,6 +935,20 @@ export default function App() {
                   <Pen className="w-4 h-4" />
                 </button>
                 <button 
+                  onClick={() => setActiveTool('wand')}
+                  className={`p-2 transition-colors ${activeTool === 'wand' ? 'bg-indigo-500 text-white' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
+                  title="Magic Wand (Fill contiguous area of same color)"
+                >
+                  <Wand2 className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={() => setActiveTool('eraser')}
+                  className={`p-2 transition-colors ${activeTool === 'eraser' ? 'bg-indigo-500 text-white' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
+                  title="Eraser (Remove filled pixel)"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                <button 
                   onClick={() => setActiveTool('pan')}
                   className={`p-2 transition-colors ${activeTool === 'pan' ? 'bg-indigo-500 text-white' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
                   title="Pan Tool (Drag to move around)"
@@ -795,7 +986,7 @@ export default function App() {
                   className="p-2 text-zinc-500 hover:text-indigo-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-indigo-400 dark:hover:bg-zinc-800 transition-colors"
                   title="Fill Entire Image (Completes the puzzle)"
                 >
-                  <Wand2 className="w-4 h-4" />
+                  <Check className="w-4 h-4" />
                 </button>
                 <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
                 <button 
@@ -912,7 +1103,7 @@ export default function App() {
                         opacity: isFilled ? 1 : 0.9,
                       }}
                     >
-                      {!isFilled && (
+                      {!isFilled && zoom >= 0.8 && (
                         <span 
                           className={`text-[10px] sm:text-xs font-mono font-bold select-none pointer-events-none ${
                             isTargetColor ? (theme === 'dark' ? 'text-zinc-300' : 'text-zinc-600') : (theme === 'dark' ? 'text-zinc-700' : 'text-zinc-300')
@@ -1020,19 +1211,83 @@ export default function App() {
                   <Download className="w-5 h-5" />
                   Export Image
                 </button>
-                <label 
-                  className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-colors cursor-pointer flex items-center gap-2"
-                  title="Upload a new image to start a project"
+                <button 
+                  onClick={() => {
+                    handleClearAll();
+                    setShowGallery(true);
+                  }}
+                  className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-colors flex items-center gap-2"
+                  title="Choose a new puzzle from the gallery"
                 >
-                  <Upload className="w-5 h-5" />
-                  New Image
-                  <input 
-                    type="file" 
-                    accept="image/*" 
-                    className="hidden" 
-                    onChange={handleFileUpload}
-                  />
-                </label>
+                  <Library className="w-5 h-5" />
+                  Gallery
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Gallery Modal */}
+      <AnimatePresence>
+        {showGallery && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/80 backdrop-blur-sm p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden"
+            >
+              <div className="flex items-center justify-between p-6 border-b border-zinc-200 dark:border-zinc-800">
+                <div>
+                  <h2 className="text-2xl font-bold text-zinc-900 dark:text-white">Puzzle Gallery</h2>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Choose a template or daily challenge to start coloring.</p>
+                </div>
+                <button 
+                  onClick={() => setShowGallery(false)}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="p-6 overflow-y-auto flex-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {GALLERY_ITEMS.map((item) => (
+                    <div 
+                      key={item.id}
+                      onClick={() => loadGalleryItem(item)}
+                      className="group cursor-pointer bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden hover:border-indigo-500 dark:hover:border-indigo-500 transition-all hover:shadow-md"
+                    >
+                      <div className="aspect-square overflow-hidden relative bg-zinc-200 dark:bg-zinc-800">
+                        <img 
+                          src={item.url} 
+                          alt={item.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          crossOrigin="anonymous"
+                        />
+                        <div className="absolute top-3 right-3">
+                          <span className={`px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-full text-white shadow-sm backdrop-blur-md ${
+                            item.difficulty === 'easy' ? 'bg-emerald-500/80' : 
+                            item.difficulty === 'medium' ? 'bg-amber-500/80' : 
+                            'bg-rose-500/80'
+                          }`}>
+                            {item.difficulty}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="p-4">
+                        <h3 className="font-semibold text-zinc-900 dark:text-white truncate">{item.title}</h3>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">by {item.author}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </motion.div>
           </motion.div>
