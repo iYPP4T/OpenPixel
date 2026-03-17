@@ -1,7 +1,9 @@
 class AudioEngine {
   private ctx: AudioContext | null = null;
+  public isMuted: boolean = false;
 
   private init() {
+    if (this.isMuted) return;
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
@@ -10,7 +12,13 @@ class AudioEngine {
     }
   }
 
+  toggleMute() {
+    this.isMuted = !this.isMuted;
+    return this.isMuted;
+  }
+
   playPop() {
+    if (this.isMuted) return;
     this.init();
     if (!this.ctx) return;
     
@@ -32,6 +40,7 @@ class AudioEngine {
   }
 
   playChime() {
+    if (this.isMuted) return;
     this.init();
     if (!this.ctx) return;
 
@@ -62,6 +71,7 @@ class AudioEngine {
   }
 
   playFanfare() {
+    if (this.isMuted) return;
     this.init();
     if (!this.ctx) return;
 

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2 } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -34,6 +34,9 @@ export default function App() {
   const [hasDismissedCompletion, setHasDismissedCompletion] = useState<boolean>(false);
   const [activeTool, setActiveTool] = useState<'draw' | 'picker' | 'pan' | 'wand' | 'eraser'>('draw');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [hideCompletedColors, setHideCompletedColors] = useState<boolean>(false);
+  const [hintPixel, setHintPixel] = useState<number | null>(null);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [endTime, setEndTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
@@ -359,6 +362,43 @@ export default function App() {
     });
   };
 
+  const handleFindPixel = () => {
+    if (!openPixelData) return;
+    
+    // Find the first missing pixel of the currently selected color
+    const targetIdx = openPixelData.pixels.findIndex((colorIdx, i) => colorIdx === selectedColorIdx && !filledPixels.has(i));
+    
+    if (targetIdx !== -1) {
+      setHintPixel(targetIdx);
+      
+      // Clear hint after 3 seconds
+      setTimeout(() => setHintPixel(null), 3000);
+      
+      // Center the pixel in the view
+      if (containerRef.current) {
+        const x = targetIdx % openPixelData.width;
+        const y = Math.floor(targetIdx / openPixelData.width);
+        
+        // Calculate pixel position in the container
+        // Base pixel size is 24px (w-6 h-6) * zoom
+        const pixelSize = 24 * zoom;
+        const pixelX = x * pixelSize;
+        const pixelY = y * pixelSize;
+        
+        // Calculate center of container
+        const containerWidth = containerRef.current.clientWidth;
+        const containerHeight = containerRef.current.clientHeight;
+        
+        // Scroll to center the pixel
+        containerRef.current.scrollTo({
+          left: pixelX - containerWidth / 2 + pixelSize / 2,
+          top: pixelY - containerHeight / 2 + pixelSize / 2,
+          behavior: 'smooth'
+        });
+      }
+    }
+  };
+
   const handleClearAll = () => {
     if (!openPixelData) return;
     
@@ -426,6 +466,7 @@ export default function App() {
           case 'e': setActiveTool('eraser'); break;
           case 'f': handleFillColor(); break;
           case 'h': handleHint(); break;
+          case 's': handleFindPixel(); break;
           case 'c': handleClearAll(); break;
         }
       }
@@ -753,6 +794,16 @@ export default function App() {
               </div>
             )}
             <button
+              onClick={() => {
+                const newMuted = audio.toggleMute();
+                setIsMuted(newMuted);
+              }}
+              className="p-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white transition-colors"
+              title={isMuted ? "Unmute Sounds" : "Mute Sounds"}
+            >
+              {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+            </button>
+            <button
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
               className="p-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white transition-colors"
               title="Toggle Theme"
@@ -1039,6 +1090,26 @@ export default function App() {
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
+                <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
+                <button 
+                  onClick={handleFindPixel}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                  title="Find Pixel (Locate next pixel of selected color)"
+                >
+                  <Search className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={() => {
+                    setZoom(1);
+                    if (containerRef.current) {
+                      containerRef.current.scrollTo({ left: 0, top: 0, behavior: 'smooth' });
+                    }
+                  }}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition-colors"
+                  title="Reset Zoom & Pan"
+                >
+                  <Maximize className="w-4 h-4" />
+                </button>
               </div>
 
               {/* Undo/Redo */}
@@ -1139,7 +1210,7 @@ export default function App() {
                         if (activeTool === 'pan') return;
                         handlePointerEnter(i);
                       }}
-                      className={`relative flex items-center justify-center transition-all duration-300 ${activeTool === 'picker' ? 'cursor-pointer' : activeTool === 'pan' ? 'pointer-events-none' : 'cursor-crosshair'} ${!isFilled && isTargetColor ? 'animate-pulse ring-1 ring-inset ring-indigo-500/50' : ''}`}
+                      className={`relative flex items-center justify-center transition-all duration-300 ${activeTool === 'picker' ? 'cursor-pointer' : activeTool === 'pan' ? 'pointer-events-none' : 'cursor-crosshair'} ${!isFilled && isTargetColor ? 'animate-pulse ring-1 ring-inset ring-indigo-500/50' : ''} ${hintPixel === i ? 'ring-4 ring-rose-500 z-10 animate-bounce' : ''}`}
                       style={{
                         backgroundColor: isFilled ? hexColor : (theme === 'dark' ? '#18181b' : '#ffffff'),
                         transform: isFilled ? 'scale(1)' : 'scale(0.95)',
@@ -1170,6 +1241,17 @@ export default function App() {
           {openPixelData && (
             <div className="bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 p-4 shrink-0 overflow-x-auto">
               <div className="max-w-4xl mx-auto min-w-max">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Palette</h3>
+                  <button
+                    onClick={() => setHideCompletedColors(!hideCompletedColors)}
+                    className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white transition-colors"
+                    title={hideCompletedColors ? "Show all colors" : "Hide completed colors"}
+                  >
+                    {hideCompletedColors ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    {hideCompletedColors ? "Show All" : "Hide Completed"}
+                  </button>
+                </div>
                 <div className="flex flex-wrap gap-2 justify-center">
                   {openPixelData.palette.map((rgb, idx) => {
                     const hexColor = rgbToHex(rgb);
@@ -1178,6 +1260,7 @@ export default function App() {
                     const isSelected = selectedColorIdx === idx;
                     
                     if (progress.total === 0) return null;
+                    if (hideCompletedColors && progress.isComplete && !isSelected) return null;
 
                     return (
                       <button
