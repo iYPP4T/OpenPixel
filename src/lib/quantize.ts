@@ -29,16 +29,42 @@ export function kMeans(pixels: RGB[], k: number, maxIterations = 10): RGB[] {
   if (pixels.length === 0) return [];
   if (k >= pixels.length) return Array.from(new Set(pixels.map(p => p.join(',')))).map(s => s.split(',').map(Number) as RGB);
 
-  // 1. Initialize centroids randomly from existing pixels
+  // 1. Initialize centroids using K-Means++
   const centroids: RGB[] = [];
-  const usedIndices = new Set<number>();
+  
+  // Choose first centroid randomly
+  const firstIdx = Math.floor(Math.random() * pixels.length);
+  centroids.push([...pixels[firstIdx]]);
+  
+  const distances = new Float32Array(pixels.length).fill(Infinity);
   
   while (centroids.length < k && centroids.length < pixels.length) {
-    const idx = Math.floor(Math.random() * pixels.length);
-    if (!usedIndices.has(idx)) {
-      centroids.push([...pixels[idx]]);
-      usedIndices.add(idx);
+    let sumSqDist = 0;
+    const lastCentroid = centroids[centroids.length - 1];
+    
+    // Update distances to the nearest centroid
+    for (let i = 0; i < pixels.length; i++) {
+      const dist = euclideanDistance(pixels[i], lastCentroid);
+      const sqDist = dist * dist;
+      if (sqDist < distances[i]) {
+        distances[i] = sqDist;
+      }
+      sumSqDist += distances[i];
     }
+    
+    // Choose next centroid based on probability proportional to squared distance
+    let r = Math.random() * sumSqDist;
+    let nextIdx = pixels.length - 1;
+    
+    for (let i = 0; i < pixels.length; i++) {
+      r -= distances[i];
+      if (r <= 0) {
+        nextIdx = i;
+        break;
+      }
+    }
+    
+    centroids.push([...pixels[nextIdx]]);
   }
 
   const assignments = new Array(pixels.length).fill(0);

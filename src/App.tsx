@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -31,6 +31,7 @@ export default function App() {
   const [showGridLines, setShowGridLines] = useState<boolean>(true);
   const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
   const [showGallery, setShowGallery] = useState<boolean>(false);
+  const [hasDismissedCompletion, setHasDismissedCompletion] = useState<boolean>(false);
   const [activeTool, setActiveTool] = useState<'draw' | 'picker' | 'pan' | 'wand' | 'eraser'>('draw');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [startTime, setStartTime] = useState<number | null>(null);
@@ -514,6 +515,12 @@ export default function App() {
     return filledPixels.size === openPixelData.pixels.length && openPixelData.pixels.length > 0;
   }, [openPixelData, filledPixels]);
 
+  useEffect(() => {
+    if (!isLevelComplete) {
+      setHasDismissedCompletion(false);
+    }
+  }, [isLevelComplete]);
+
   const completedColorsRef = useRef<Set<number>>(new Set());
 
   // Sync completedColorsRef with colorProgress (handles undo/redo)
@@ -573,15 +580,15 @@ export default function App() {
     downloadAnchorNode.remove();
   };
 
-  const exportImage = (format: 'png' | 'jpeg' | 'webp') => {
-    if (!openPixelData) return;
+  const createExportCanvas = (format: 'png' | 'jpeg' | 'webp') => {
+    if (!openPixelData) return null;
     
     const canvas = document.createElement('canvas');
     const scale = 30; // Export at a higher resolution
     canvas.width = openPixelData.width * scale;
     canvas.height = openPixelData.height * scale;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) return null;
 
     if (showGridLines) {
       ctx.fillStyle = theme === 'dark' ? '#27272a' : '#e4e4e7'; // zinc-800 / zinc-200
@@ -616,6 +623,13 @@ export default function App() {
       }
     });
 
+    return canvas;
+  };
+
+  const exportImage = (format: 'png' | 'jpeg' | 'webp') => {
+    const canvas = createExportCanvas(format);
+    if (!canvas) return;
+
     const dataUrl = canvas.toDataURL(`image/${format}`, 0.9);
     const downloadAnchorNode = document.createElement('a');
     downloadAnchorNode.setAttribute("href", dataUrl);
@@ -623,6 +637,35 @@ export default function App() {
     document.body.appendChild(downloadAnchorNode);
     downloadAnchorNode.click();
     downloadAnchorNode.remove();
+  };
+
+  const handleShare = async () => {
+    const canvas = createExportCanvas('png');
+    if (!canvas) return;
+    
+    canvas.toBlob(async (blob) => {
+      if (!blob) return;
+      const file = new File([blob], 'pixel-art.png', { type: 'image/png' });
+      
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            title: 'My Pixel Art',
+            text: 'Check out my masterpiece on OpenPixel!',
+            files: [file]
+          });
+        } catch (err) {
+          if ((err as Error).name !== 'AbortError') {
+            console.error('Share failed:', err);
+          }
+        }
+      } else {
+        // Fallback to Twitter intent
+        const text = encodeURIComponent('I just completed a pixel art masterpiece on OpenPixel! 🎨✨');
+        const url = encodeURIComponent(window.location.href);
+        window.open(`https://twitter.com/intent/tweet?text=${text}&url=${url}`, '_blank');
+      }
+    }, 'image/png');
   };
 
   const exportTimelapse = async () => {
@@ -1184,7 +1227,7 @@ export default function App() {
 
       {/* Level Complete Overlay */}
       <AnimatePresence>
-        {isLevelComplete && (
+        {isLevelComplete && !hasDismissedCompletion && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1202,25 +1245,43 @@ export default function App() {
               <h2 className="text-3xl font-bold text-zinc-900 dark:text-white mb-2">Masterpiece!</h2>
               <p className="text-zinc-500 dark:text-zinc-400 mb-8">You've successfully colored all the pixels.</p>
               
-              <div className="flex gap-4 justify-center">
-                <button 
-                  onClick={() => exportImage('png')}
-                  className="px-6 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-900 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-white font-medium rounded-xl transition-colors flex items-center gap-2"
-                  title="Export completed design as PNG"
-                >
-                  <Download className="w-5 h-5" />
-                  Export Image
-                </button>
+              <div className="flex flex-col gap-3">
+                <div className="flex gap-3 justify-center">
+                  <button 
+                    onClick={() => exportImage('png')}
+                    className="flex-1 px-4 py-3 bg-zinc-100 hover:bg-zinc-200 text-zinc-900 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
+                    title="Export completed design as PNG"
+                  >
+                    <Download className="w-5 h-5" />
+                    Export
+                  </button>
+                  <button 
+                    onClick={handleShare}
+                    className="flex-1 px-4 py-3 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
+                    title="Share your masterpiece"
+                  >
+                    <Share2 className="w-5 h-5" />
+                    Share
+                  </button>
+                </div>
                 <button 
                   onClick={() => {
                     handleClearAll();
                     setShowGallery(true);
                   }}
-                  className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-colors flex items-center gap-2"
+                  className="w-full px-4 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
                   title="Choose a new puzzle from the gallery"
                 >
                   <Library className="w-5 h-5" />
                   Gallery
+                </button>
+                <button 
+                  onClick={() => setHasDismissedCompletion(true)}
+                  className="w-full px-4 py-3 bg-transparent hover:bg-zinc-100 text-zinc-600 dark:hover:bg-zinc-800 dark:text-zinc-400 font-medium rounded-xl transition-colors flex items-center justify-center gap-2"
+                  title="View the completed puzzle"
+                >
+                  <ImageIcon className="w-5 h-5" />
+                  View Result
                 </button>
               </div>
             </motion.div>
