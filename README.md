@@ -16,6 +16,8 @@
 - **Advanced Tooling**: Includes a Draw tool, Pan tool, Color Picker (Pipette), and full Undo/Redo history support.
 - **Light & Dark Mode**: Fully responsive UI with seamless theme switching.
 - **Export Options**: Export your generated pixel art designs as PNG, JPEG, WebP, or as machine-readable `OpenPixel JSON` files.
+- **OpenPixel JSON Import**: Re-open previously exported `.openpixel.json` designs directly in the app.
+- **Session Insights**: Live pace metrics (pixels/minute and ETA) help you track coloring speed and remaining effort.
 - **Privacy First**: All image processing happens locally in your browser. No images are uploaded to any server.
 
 ## 🚀 Tech Stack

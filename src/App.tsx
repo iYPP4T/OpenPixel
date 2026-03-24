@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus, FileUp, Gauge } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -53,6 +53,9 @@ export default function App() {
     { key: 'S', action: 'Find next pixel of selected color' },
     { key: 'C', action: 'Clear board' },
     { key: 'N', action: 'Jump to next incomplete color' },
+    { key: 'G', action: 'Toggle grid lines' },
+    { key: '+ / -', action: 'Zoom in / out' },
+    { key: '0', action: 'Reset zoom' },
     { key: 'Ctrl/Cmd + Z', action: 'Undo' },
     { key: 'Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y', action: 'Redo' },
     { key: '?', action: 'Open/close shortcuts' },
@@ -213,6 +216,64 @@ export default function App() {
       alert("Failed to process image.");
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const isValidOpenPixelFormat = (data: unknown): data is OpenPixelFormat => {
+    if (!data || typeof data !== 'object') return false;
+    const payload = data as Record<string, unknown>;
+
+    if (typeof payload.version !== 'string') return false;
+    if (typeof payload.width !== 'number' || payload.width <= 0) return false;
+    if (typeof payload.height !== 'number' || payload.height <= 0) return false;
+    if (!Array.isArray(payload.palette) || !Array.isArray(payload.pixels)) return false;
+
+    const paletteValid = payload.palette.every((entry) =>
+      Array.isArray(entry) &&
+      entry.length === 3 &&
+      entry.every((c) => typeof c === 'number' && c >= 0 && c <= 255)
+    );
+    if (!paletteValid) return false;
+
+    const pixelCount = payload.width * payload.height;
+    if (payload.pixels.length !== pixelCount) return false;
+
+    const maxPaletteIdx = payload.palette.length - 1;
+    return payload.pixels.every((idx) => typeof idx === 'number' && idx >= 0 && idx <= maxPaletteIdx);
+  };
+
+  const handleOpenPixelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw);
+      if (!isValidOpenPixelFormat(parsed)) {
+        alert('Invalid OpenPixel JSON format. Please import a valid .openpixel.json file.');
+        return;
+      }
+
+      setImage(null);
+      setOpenPixelData(parsed);
+      const initialPixels = new Set<number>();
+      setFilledPixels(initialPixels);
+      setHistory([initialPixels]);
+      setHistoryIndex(0);
+      pendingChanges.current = false;
+      completedColorsRef.current = new Set();
+      setSelectedColorIdx(0);
+      setZoom(1);
+      setShowExportMenu(false);
+      setStartTime(null);
+      setEndTime(null);
+      setHintPixel(null);
+      setHasDismissedCompletion(false);
+    } catch (error) {
+      console.error('Failed to import OpenPixel JSON:', error);
+      alert('Failed to import file. Make sure the file is valid JSON.');
+    } finally {
+      e.target.value = '';
     }
   };
 
@@ -562,6 +623,12 @@ export default function App() {
           case 's': handleFindPixel(); break;
           case 'c': handleClearAll(); break;
           case 'n': selectNextIncompleteColor(); break;
+          case 'g': setShowGridLines(prev => !prev); break;
+          case '+':
+          case '=': setZoom(z => Math.min(5, z + 0.25)); break;
+          case '-':
+          case '_': setZoom(z => Math.max(0.1, z - 0.25)); break;
+          case '0': setZoom(1); break;
         }
       }
     };
@@ -656,6 +723,19 @@ export default function App() {
   }, [openPixelData, filledPixels]);
 
   const completedColorCount = useMemo(() => colorProgress.filter((p) => p.isComplete).length, [colorProgress]);
+  const completionPercent = useMemo(() => {
+    if (!openPixelData || openPixelData.pixels.length === 0) return 0;
+    return Math.round((filledPixels.size / openPixelData.pixels.length) * 100);
+  }, [openPixelData, filledPixels]);
+  const pixelsPerMinute = useMemo(() => {
+    if (!startTime || elapsedTime <= 0) return 0;
+    return (filledPixels.size / elapsedTime) * 60_000;
+  }, [startTime, elapsedTime, filledPixels]);
+  const estimatedMinutesLeft = useMemo(() => {
+    if (!openPixelData || pixelsPerMinute <= 0) return null;
+    const remaining = Math.max(0, openPixelData.pixels.length - filledPixels.size);
+    return remaining / pixelsPerMinute;
+  }, [openPixelData, filledPixels, pixelsPerMinute]);
 
   useEffect(() => {
     if (!isLevelComplete) {
@@ -963,6 +1043,19 @@ export default function App() {
                 onChange={handleFileUpload}
               />
             </label>
+            <label
+              className="flex items-center gap-2 px-3 py-2 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700 dark:text-zinc-200 text-sm font-medium rounded-md cursor-pointer transition-colors"
+              title="Import a previously exported OpenPixel JSON file"
+            >
+              <FileUp className="w-4 h-4" />
+              <span className="hidden md:inline">Import JSON</span>
+              <input
+                type="file"
+                accept=".json,.openpixel.json,application/json"
+                className="hidden"
+                onChange={handleOpenPixelImport}
+              />
+            </label>
           </div>
         </div>
       </header>
@@ -1107,14 +1200,14 @@ export default function App() {
                 <div className="flex justify-between items-center text-sm">
                   <span className="text-zinc-500 dark:text-zinc-400">Progress</span>
                   <span className="font-mono text-indigo-500 dark:text-indigo-400">
-                    {Math.round((filledPixels.size / openPixelData.pixels.length) * 100)}%
+                    {completionPercent}%
                   </span>
                 </div>
                 <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full mt-2 overflow-hidden">
                   <motion.div 
                     className="h-full bg-indigo-500"
                     initial={{ width: 0 }}
-                    animate={{ width: `${(filledPixels.size / openPixelData.pixels.length) * 100}%` }}
+                    animate={{ width: `${completionPercent}%` }}
                   />
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -1125,6 +1218,22 @@ export default function App() {
                   <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
                     Colors done
                     <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{completedColorCount}/{openPixelData.palette.length}</div>
+                  </div>
+                </div>
+                <div className="mt-3 px-2.5 py-2 rounded-md bg-indigo-50/70 dark:bg-indigo-500/10 text-zinc-600 dark:text-zinc-300 border border-indigo-100 dark:border-indigo-500/20">
+                  <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide font-semibold text-indigo-600 dark:text-indigo-300">
+                    <Gauge className="w-3.5 h-3.5" />
+                    Session Pace
+                  </div>
+                  <div className="mt-1.5 text-xs flex justify-between">
+                    <span>Speed</span>
+                    <span className="font-mono font-semibold text-zinc-900 dark:text-zinc-100">{pixelsPerMinute > 0 ? `${pixelsPerMinute.toFixed(1)} px/min` : '—'}</span>
+                  </div>
+                  <div className="mt-1 text-xs flex justify-between">
+                    <span>ETA</span>
+                    <span className="font-mono font-semibold text-zinc-900 dark:text-zinc-100">
+                      {estimatedMinutesLeft !== null ? `${Math.max(1, Math.round(estimatedMinutesLeft))} min` : '—'}
+                    </span>
                   </div>
                 </div>
               </div>
