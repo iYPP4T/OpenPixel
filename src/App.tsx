@@ -66,6 +66,7 @@ export default function App() {
   const [history, setHistory] = useState<Set<number>[]>([new Set()]);
   const [historyIndex, setHistoryIndex] = useState<number>(0);
   const pendingChanges = useRef(false);
+  const completedColorsRef = useRef<Set<number>>(new Set());
 
   // --- Persistence ---
   useEffect(() => {
@@ -157,6 +158,22 @@ export default function App() {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
+  const resetPuzzleState = () => {
+    const initialPixels = new Set<number>();
+    setFilledPixels(initialPixels);
+    setHistory([initialPixels]);
+    setHistoryIndex(0);
+    pendingChanges.current = false;
+    completedColorsRef.current = new Set();
+    setSelectedColorIdx(0);
+    setZoom(1);
+    setShowExportMenu(false);
+    setStartTime(null);
+    setEndTime(null);
+    setHintPixel(null);
+    setHasDismissedCompletion(false);
+  };
+
   // --- Processing ---
   const processImage = async (img: HTMLImageElement, size: number, colors: number | 'auto', dither: boolean, smooth: boolean, paletteName: PaletteName) => {
     setIsProcessing(true);
@@ -200,17 +217,7 @@ export default function App() {
         palette,
         pixels: mappedPixels
       });
-      
-      const initialPixels = new Set<number>();
-      setFilledPixels(initialPixels);
-      setHistory([initialPixels]);
-      setHistoryIndex(0);
-      pendingChanges.current = false;
-      completedColorsRef.current = new Set();
-      setSelectedColorIdx(0);
-      setZoom(1);
-      setStartTime(null);
-      setEndTime(null);
+      resetPuzzleState();
     } catch (error) {
       console.error("Error processing image:", error);
       alert("Failed to process image.");
@@ -256,19 +263,7 @@ export default function App() {
 
       setImage(null);
       setOpenPixelData(parsed);
-      const initialPixels = new Set<number>();
-      setFilledPixels(initialPixels);
-      setHistory([initialPixels]);
-      setHistoryIndex(0);
-      pendingChanges.current = false;
-      completedColorsRef.current = new Set();
-      setSelectedColorIdx(0);
-      setZoom(1);
-      setShowExportMenu(false);
-      setStartTime(null);
-      setEndTime(null);
-      setHintPixel(null);
-      setHasDismissedCompletion(false);
+      resetPuzzleState();
     } catch (error) {
       console.error('Failed to import OpenPixel JSON:', error);
       alert('Failed to import file. Make sure the file is valid JSON.');
@@ -742,8 +737,6 @@ export default function App() {
       setHasDismissedCompletion(false);
     }
   }, [isLevelComplete]);
-
-  const completedColorsRef = useRef<Set<number>>(new Set());
 
   // Sync completedColorsRef with colorProgress (handles undo/redo)
   useEffect(() => {
