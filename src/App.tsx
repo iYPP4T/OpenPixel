@@ -1,7 +1,7 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -37,6 +37,7 @@ export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [hideCompletedColors, setHideCompletedColors] = useState<boolean>(false);
+  const [focusSelectedColor, setFocusSelectedColor] = useState<boolean>(false);
   const [hintPixel, setHintPixel] = useState<number | null>(null);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [endTime, setEndTime] = useState<number | null>(null);
@@ -51,6 +52,7 @@ export default function App() {
     { key: 'H', action: 'Hint (fill one pixel)' },
     { key: 'S', action: 'Find next pixel of selected color' },
     { key: 'C', action: 'Clear board' },
+    { key: 'N', action: 'Jump to next incomplete color' },
     { key: 'Ctrl/Cmd + Z', action: 'Undo' },
     { key: 'Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y', action: 'Redo' },
     { key: '?', action: 'Open/close shortcuts' },
@@ -88,6 +90,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const savedPrefs = localStorage.getItem('openPixelPrefs');
+    if (!savedPrefs) return;
+    try {
+      const parsed = JSON.parse(savedPrefs);
+      if (parsed.theme === 'light' || parsed.theme === 'dark') setTheme(parsed.theme);
+      if (typeof parsed.isMuted === 'boolean') {
+        audio.isMuted = parsed.isMuted;
+        setIsMuted(parsed.isMuted);
+      }
+      if (typeof parsed.showGridLines === 'boolean') setShowGridLines(parsed.showGridLines);
+      if (typeof parsed.hideCompletedColors === 'boolean') setHideCompletedColors(parsed.hideCompletedColors);
+      if (typeof parsed.focusSelectedColor === 'boolean') setFocusSelectedColor(parsed.focusSelectedColor);
+    } catch (e) {
+      console.error("Failed to load preferences", e);
+    }
+  }, []);
+
+  useEffect(() => {
     if (openPixelData) {
       localStorage.setItem('openPixelSave', JSON.stringify({
         openPixelData,
@@ -101,6 +121,16 @@ export default function App() {
       }));
     }
   }, [openPixelData, filledPixels, gridSize, colorCount, useDithering, useSmoothing, startTime, endTime]);
+
+  useEffect(() => {
+    localStorage.setItem('openPixelPrefs', JSON.stringify({
+      theme,
+      isMuted,
+      showGridLines,
+      hideCompletedColors,
+      focusSelectedColor
+    }));
+  }, [theme, isMuted, showGridLines, hideCompletedColors, focusSelectedColor]);
 
   // --- Timer ---
   useEffect(() => {
@@ -460,6 +490,37 @@ export default function App() {
     }
   };
 
+  const selectNextIncompleteColor = useCallback(() => {
+    if (!openPixelData) return;
+    const totalColors = openPixelData.palette.length;
+    if (totalColors === 0) return;
+
+    const counts = new Array(totalColors).fill(0);
+    const filled = new Array(totalColors).fill(0);
+
+    openPixelData.pixels.forEach((colorIdx, idx) => {
+      counts[colorIdx]++;
+      if (filledPixels.has(idx)) filled[colorIdx]++;
+    });
+
+    const isIncomplete = (idx: number) => counts[idx] > 0 && filled[idx] < counts[idx];
+    if (!isIncomplete(selectedColorIdx)) {
+      const firstIncomplete = counts.findIndex((_, idx) => isIncomplete(idx));
+      if (firstIncomplete !== -1) {
+        setSelectedColorIdx(firstIncomplete);
+      }
+      return;
+    }
+
+    for (let step = 1; step <= totalColors; step++) {
+      const idx = (selectedColorIdx + step) % totalColors;
+      if (isIncomplete(idx)) {
+        setSelectedColorIdx(idx);
+        return;
+      }
+    }
+  }, [openPixelData, filledPixels, selectedColorIdx]);
+
   // Keyboard shortcuts for Tools and Undo/Redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -500,12 +561,13 @@ export default function App() {
           case 'h': handleHint(); break;
           case 's': handleFindPixel(); break;
           case 'c': handleClearAll(); break;
+          case 'n': selectNextIncompleteColor(); break;
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [history, historyIndex, activeTool, selectedColorIdx, openPixelData, filledPixels]);
+  }, [history, historyIndex, activeTool, selectedColorIdx, openPixelData, filledPixels, selectNextIncompleteColor]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -587,6 +649,13 @@ export default function App() {
     if (!openPixelData) return false;
     return filledPixels.size === openPixelData.pixels.length && openPixelData.pixels.length > 0;
   }, [openPixelData, filledPixels]);
+
+  const remainingPixels = useMemo(() => {
+    if (!openPixelData) return 0;
+    return Math.max(0, openPixelData.pixels.length - filledPixels.size);
+  }, [openPixelData, filledPixels]);
+
+  const completedColorCount = useMemo(() => colorProgress.filter((p) => p.isComplete).length, [colorProgress]);
 
   useEffect(() => {
     if (!isLevelComplete) {
@@ -1048,6 +1117,16 @@ export default function App() {
                     animate={{ width: `${(filledPixels.size / openPixelData.pixels.length) * 100}%` }}
                   />
                 </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                  <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
+                    Remaining
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{remainingPixels}</div>
+                  </div>
+                  <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
+                    Colors done
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{completedColorCount}/{openPixelData.palette.length}</div>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -1136,6 +1215,20 @@ export default function App() {
                   title="Find Pixel (Locate next pixel of selected color)"
                 >
                   <Search className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={selectNextIncompleteColor}
+                  className="p-2 text-zinc-500 hover:text-indigo-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-indigo-400 dark:hover:bg-zinc-800 transition-colors"
+                  title="Next Incomplete Color (N)"
+                >
+                  <SkipForward className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setFocusSelectedColor(prev => !prev)}
+                  className={`p-2 transition-colors ${focusSelectedColor ? 'text-indigo-500 bg-indigo-50 dark:bg-indigo-500/20 dark:text-indigo-300' : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800'}`}
+                  title={focusSelectedColor ? 'Focus Mode On (emphasize selected color)' : 'Focus Mode Off'}
+                >
+                  <Focus className="w-4 h-4" />
                 </button>
                 <button 
                   onClick={() => {
@@ -1253,7 +1346,7 @@ export default function App() {
                       style={{
                         backgroundColor: isFilled ? hexColor : (theme === 'dark' ? '#18181b' : '#ffffff'),
                         transform: isFilled ? 'scale(1)' : 'scale(0.95)',
-                        opacity: isFilled ? 1 : 0.9,
+                        opacity: focusSelectedColor && !isTargetColor ? (isFilled ? 0.3 : 0.15) : (isFilled ? 1 : 0.9),
                       }}
                     >
                       {!isFilled && zoom >= 0.8 && (
