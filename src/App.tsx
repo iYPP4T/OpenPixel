@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -31,6 +31,7 @@ export default function App() {
   const [showGridLines, setShowGridLines] = useState<boolean>(true);
   const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
   const [showGallery, setShowGallery] = useState<boolean>(false);
+  const [showShortcuts, setShowShortcuts] = useState<boolean>(false);
   const [hasDismissedCompletion, setHasDismissedCompletion] = useState<boolean>(false);
   const [activeTool, setActiveTool] = useState<'draw' | 'picker' | 'pan' | 'wand' | 'eraser'>('draw');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -40,6 +41,21 @@ export default function App() {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [endTime, setEndTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
+  const keyboardShortcuts = useMemo(() => ([
+    { key: 'B', action: 'Draw tool' },
+    { key: 'W', action: 'Magic wand tool' },
+    { key: 'E', action: 'Eraser tool' },
+    { key: 'V', action: 'Pan tool' },
+    { key: 'I', action: 'Color picker tool' },
+    { key: 'F', action: 'Fill selected color' },
+    { key: 'H', action: 'Hint (fill one pixel)' },
+    { key: 'S', action: 'Find next pixel of selected color' },
+    { key: 'C', action: 'Clear board' },
+    { key: 'Ctrl/Cmd + Z', action: 'Undo' },
+    { key: 'Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y', action: 'Redo' },
+    { key: '?', action: 'Open/close shortcuts' },
+    { key: 'Esc', action: 'Close open dialogs/menus' }
+  ]), []);
 
   // History State
   const [history, setHistory] = useState<Set<number>[]>([new Set()]);
@@ -447,6 +463,22 @@ export default function App() {
   // Keyboard shortcuts for Tools and Undo/Redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isTypingField = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT' || target?.isContentEditable;
+
+      if (e.key === 'Escape') {
+        setShowExportMenu(false);
+        setShowGallery(false);
+        setShowShortcuts(false);
+        return;
+      }
+
+      if (!isTypingField && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
+        e.preventDefault();
+        setShowShortcuts(prev => !prev);
+        return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -457,7 +489,7 @@ export default function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         handleRedo();
-      } else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.target instanceof HTMLElement && e.target.tagName !== 'INPUT') {
+      } else if (!isTypingField && !e.ctrlKey && !e.metaKey && !e.altKey) {
         switch(e.key.toLowerCase()) {
           case 'b': setActiveTool('draw'); break;
           case 'v': setActiveTool('pan'); break;
@@ -793,6 +825,13 @@ export default function App() {
                 {formatTime(elapsedTime)}
               </div>
             )}
+            <button
+              onClick={() => setShowShortcuts(true)}
+              className="p-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white transition-colors"
+              title="Keyboard Shortcuts (?)"
+            >
+              <Keyboard className="w-5 h-5" />
+            </button>
             <button
               onClick={() => {
                 const newMuted = audio.toggleMute();
@@ -1309,6 +1348,51 @@ export default function App() {
       </main>
 
       {/* Level Complete Overlay */}
+      <AnimatePresence>
+        {showShortcuts && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/80 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 16 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 16 }}
+              className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl max-w-xl w-full max-h-[90vh] overflow-hidden"
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
+                <div>
+                  <h2 className="text-xl font-bold text-zinc-900 dark:text-white">Keyboard Shortcuts</h2>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Speed up your workflow while painting.</p>
+                </div>
+                <button
+                  onClick={() => setShowShortcuts(false)}
+                  className="p-2 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="px-6 py-5 space-y-2 overflow-y-auto max-h-[65vh]">
+                {keyboardShortcuts.map((shortcut) => (
+                  <div
+                    key={shortcut.key}
+                    className="flex items-center justify-between gap-4 px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-700/50"
+                  >
+                    <span className="text-sm text-zinc-700 dark:text-zinc-300">{shortcut.action}</span>
+                    <kbd className="text-xs font-mono font-semibold px-2 py-1 rounded bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 text-zinc-600 dark:text-zinc-300 whitespace-nowrap">
+                      {shortcut.key}
+                    </kbd>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {isLevelComplete && !hasDismissedCompletion && (
           <motion.div 
