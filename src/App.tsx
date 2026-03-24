@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus, Save, FolderOpen } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -10,6 +10,18 @@ import { rgbToHex, getContrastColor } from './lib/utils';
 import { audio } from './lib/audio';
 import { PaletteName, PRESET_PALETTES } from './lib/palettes';
 import { GALLERY_ITEMS, GalleryItem } from './lib/gallery';
+
+type OpenPixelSession = {
+  version: string;
+  openPixelData: OpenPixelFormat;
+  filledPixels: number[];
+  gridSize: number;
+  colorCount: number | 'auto';
+  useDithering: boolean;
+  useSmoothing: boolean;
+  startTime: number | null;
+  endTime: number | null;
+};
 
 export default function App() {
   // --- State ---
@@ -42,6 +54,11 @@ export default function App() {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [endTime, setEndTime] = useState<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0);
+  const [bestTime, setBestTime] = useState<number | null>(null);
+  const [completedPuzzles, setCompletedPuzzles] = useState<number>(0);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const importSessionRef = useRef<HTMLInputElement>(null);
+  const recordedCompletionRef = useRef(false);
   const keyboardShortcuts = useMemo(() => ([
     { key: 'B', action: 'Draw tool' },
     { key: 'W', action: 'Magic wand tool' },
@@ -51,6 +68,7 @@ export default function App() {
     { key: 'F', action: 'Fill selected color' },
     { key: 'H', action: 'Hint (fill one pixel)' },
     { key: 'S', action: 'Find next pixel of selected color' },
+    { key: 'G', action: 'Toggle grid lines' },
     { key: 'C', action: 'Clear board' },
     { key: 'N', action: 'Jump to next incomplete color' },
     { key: 'Ctrl/Cmd + Z', action: 'Undo' },
@@ -102,6 +120,8 @@ export default function App() {
       if (typeof parsed.showGridLines === 'boolean') setShowGridLines(parsed.showGridLines);
       if (typeof parsed.hideCompletedColors === 'boolean') setHideCompletedColors(parsed.hideCompletedColors);
       if (typeof parsed.focusSelectedColor === 'boolean') setFocusSelectedColor(parsed.focusSelectedColor);
+      if (typeof parsed.bestTime === 'number') setBestTime(parsed.bestTime);
+      if (typeof parsed.completedPuzzles === 'number') setCompletedPuzzles(parsed.completedPuzzles);
     } catch (e) {
       console.error("Failed to load preferences", e);
     }
@@ -128,9 +148,11 @@ export default function App() {
       isMuted,
       showGridLines,
       hideCompletedColors,
-      focusSelectedColor
+      focusSelectedColor,
+      bestTime,
+      completedPuzzles
     }));
-  }, [theme, isMuted, showGridLines, hideCompletedColors, focusSelectedColor]);
+  }, [theme, isMuted, showGridLines, hideCompletedColors, focusSelectedColor, bestTime, completedPuzzles]);
 
   // --- Timer ---
   useEffect(() => {
@@ -208,6 +230,7 @@ export default function App() {
       setZoom(1);
       setStartTime(null);
       setEndTime(null);
+      recordedCompletionRef.current = false;
     } catch (error) {
       console.error("Error processing image:", error);
       alert("Failed to process image.");
@@ -560,6 +583,7 @@ export default function App() {
           case 'f': handleFillColor(); break;
           case 'h': handleHint(); break;
           case 's': handleFindPixel(); break;
+          case 'g': setShowGridLines(prev => !prev); break;
           case 'c': handleClearAll(); break;
           case 'n': selectNextIncompleteColor(); break;
         }
@@ -656,6 +680,18 @@ export default function App() {
   }, [openPixelData, filledPixels]);
 
   const completedColorCount = useMemo(() => colorProgress.filter((p) => p.isComplete).length, [colorProgress]);
+  const fillRate = useMemo(() => {
+    const minutes = elapsedTime / 60000;
+    if (minutes <= 0 || filledPixels.size === 0) return 0;
+    return filledPixels.size / minutes;
+  }, [elapsedTime, filledPixels.size]);
+
+  const moveEfficiency = useMemo(() => {
+    if (!openPixelData) return 100;
+    const actions = Math.max(1, historyIndex);
+    const efficiency = (filledPixels.size / actions) * 100;
+    return Math.min(100, Math.round(efficiency));
+  }, [openPixelData, filledPixels.size, historyIndex]);
 
   useEffect(() => {
     if (!isLevelComplete) {
@@ -709,6 +745,21 @@ export default function App() {
     }
   }, [isLevelComplete, endTime]);
 
+  useEffect(() => {
+    if (!statusMessage) return;
+    const timeoutId = window.setTimeout(() => setStatusMessage(null), 2400);
+    return () => window.clearTimeout(timeoutId);
+  }, [statusMessage]);
+
+  useEffect(() => {
+    if (!isLevelComplete || recordedCompletionRef.current) return;
+    recordedCompletionRef.current = true;
+    setCompletedPuzzles((prev) => prev + 1);
+    if (elapsedTime > 0) {
+      setBestTime((prev) => (prev === null || elapsedTime < prev ? elapsedTime : prev));
+    }
+  }, [isLevelComplete, elapsedTime]);
+
   // --- Export ---
   const exportOpenPixel = () => {
     if (!openPixelData) return;
@@ -720,6 +771,62 @@ export default function App() {
     document.body.appendChild(downloadAnchorNode);
     downloadAnchorNode.click();
     downloadAnchorNode.remove();
+  };
+
+  const exportSession = () => {
+    if (!openPixelData) return;
+    const sessionData: OpenPixelSession = {
+      version: "1.0.0",
+      openPixelData,
+      filledPixels: Array.from(filledPixels),
+      gridSize,
+      colorCount,
+      useDithering,
+      useSmoothing,
+      startTime,
+      endTime
+    };
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(sessionData, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "session.openpixel.json");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+    setStatusMessage('Session exported');
+  };
+
+  const importSession = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const raw = await file.text();
+      const parsed = JSON.parse(raw) as OpenPixelSession;
+      if (!parsed?.openPixelData?.pixels || !parsed?.openPixelData?.palette) {
+        throw new Error('Invalid session file');
+      }
+      const restored = new Set<number>(parsed.filledPixels || []);
+      setOpenPixelData(parsed.openPixelData);
+      setFilledPixels(restored);
+      setHistory([restored]);
+      setHistoryIndex(0);
+      setGridSize(parsed.gridSize ?? 32);
+      setColorCount(parsed.colorCount ?? 'auto');
+      setUseDithering(Boolean(parsed.useDithering));
+      setUseSmoothing(Boolean(parsed.useSmoothing));
+      setStartTime(parsed.startTime ?? null);
+      setEndTime(parsed.endTime ?? null);
+      setImage(null);
+      setZoom(1);
+      setSelectedColorIdx(0);
+      recordedCompletionRef.current = Boolean(parsed.endTime);
+      setStatusMessage('Session imported');
+    } catch (error) {
+      console.error('Failed to import session', error);
+      alert('Failed to import session file.');
+    } finally {
+      e.target.value = '';
+    }
   };
 
   const createExportCanvas = (format: 'png' | 'jpeg' | 'webp') => {
@@ -926,6 +1033,21 @@ export default function App() {
               <Library className="w-4 h-4" />
               <span className="hidden sm:inline">Gallery</span>
             </button>
+            <button
+              onClick={() => importSessionRef.current?.click()}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 hover:bg-zinc-100 dark:hover:text-white dark:hover:bg-zinc-800 rounded-md transition-colors"
+              title="Import a saved session"
+            >
+              <FolderOpen className="w-4 h-4" />
+              <span className="hidden sm:inline">Load Session</span>
+            </button>
+            <input
+              ref={importSessionRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={importSession}
+            />
             {openPixelData && (
               <div className="relative">
                 <button 
@@ -941,6 +1063,7 @@ export default function App() {
                 {showExportMenu && (
                   <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-md shadow-xl z-50 overflow-hidden">
                     <button onClick={() => { exportOpenPixel(); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as OpenPixel JSON format">OpenPixel JSON</button>
+                    <button onClick={() => { exportSession(); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export full progress as session JSON">Session Save</button>
                     <button onClick={() => { exportImage('png'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as PNG image">Image (PNG)</button>
                     <button onClick={() => { exportImage('jpeg'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as JPEG image">Image (JPEG)</button>
                     <button onClick={() => { exportImage('webp'); setShowExportMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white" title="Export as WebP image">Image (WebP)</button>
@@ -1126,6 +1249,18 @@ export default function App() {
                     Colors done
                     <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{completedColorCount}/{openPixelData.palette.length}</div>
                   </div>
+                  <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
+                    Fill rate
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{fillRate ? `${Math.round(fillRate)}/min` : '--'}</div>
+                  </div>
+                  <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
+                    Efficiency
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{moveEfficiency}%</div>
+                  </div>
+                </div>
+                <div className="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400 flex justify-between">
+                  <span>Puzzles solved: <span className="font-semibold text-zinc-700 dark:text-zinc-200">{completedPuzzles}</span></span>
+                  <span>Best time: <span className="font-semibold text-zinc-700 dark:text-zinc-200">{bestTime ? formatTime(bestTime) : '--:--'}</span></span>
                 </div>
               </div>
             </div>
@@ -1191,6 +1326,14 @@ export default function App() {
                   title="Hint (Fills one random pixel of the selected color)"
                 >
                   <Lightbulb className="w-4 h-4" />
+                </button>
+                <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
+                <button
+                  onClick={exportSession}
+                  className="p-2 text-zinc-500 hover:text-emerald-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-emerald-400 dark:hover:bg-zinc-800 transition-colors"
+                  title="Quick Save Session"
+                >
+                  <Save className="w-4 h-4" />
                 </button>
                 <div className="w-px bg-zinc-200 dark:bg-zinc-800" />
                 <button 
@@ -1611,6 +1754,19 @@ export default function App() {
                 </div>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {statusMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-zinc-900 text-zinc-100 text-sm shadow-xl border border-zinc-700"
+          >
+            {statusMessage}
           </motion.div>
         )}
       </AnimatePresence>
