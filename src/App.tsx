@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useGesture } from '@use-gesture/react';
-import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus } from 'lucide-react';
+import { Upload, Download, Check, Settings2, Image as ImageIcon, ZoomIn, ZoomOut, Undo, Redo, ChevronDown, Pipette, Hand, Pen, Sun, Moon, PaintBucket, Wand2, Trash2, Lightbulb, Clock, Library, X, Share2, Volume2, VolumeX, Maximize, EyeOff, Eye, Search, Keyboard, SkipForward, Focus, Gauge, Sparkles } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { loadImage, downsampleImage } from './lib/pixelate';
 import { kMeans, mapToPalette } from './lib/quantize';
@@ -51,6 +51,7 @@ export default function App() {
     { key: 'F', action: 'Fill selected color' },
     { key: 'H', action: 'Hint (fill one pixel)' },
     { key: 'S', action: 'Find next pixel of selected color' },
+    { key: 'A', action: 'Smart assist (most unfinished color)' },
     { key: 'C', action: 'Clear board' },
     { key: 'N', action: 'Jump to next incomplete color' },
     { key: 'Ctrl/Cmd + Z', action: 'Undo' },
@@ -445,6 +446,39 @@ export default function App() {
     }
   };
 
+  const handleSmartAssist = useCallback(() => {
+    if (!openPixelData) return;
+
+    const remainingByColor = new Array(openPixelData.palette.length).fill(0);
+    openPixelData.pixels.forEach((colorIdx, index) => {
+      if (!filledPixels.has(index)) remainingByColor[colorIdx]++;
+    });
+
+    const bestColorIdx = remainingByColor.reduce((bestIdx, count, idx, arr) => (
+      count > arr[bestIdx] ? idx : bestIdx
+    ), 0);
+
+    if (remainingByColor[bestColorIdx] <= 0) return;
+
+    setSelectedColorIdx(bestColorIdx);
+    const targetIdx = openPixelData.pixels.findIndex((colorIdx, i) => colorIdx === bestColorIdx && !filledPixels.has(i));
+    if (targetIdx === -1) return;
+
+    setHintPixel(targetIdx);
+    setTimeout(() => setHintPixel(null), 3000);
+
+    if (containerRef.current) {
+      const x = targetIdx % openPixelData.width;
+      const y = Math.floor(targetIdx / openPixelData.width);
+      const pixelSize = 24 * zoom;
+      containerRef.current.scrollTo({
+        left: x * pixelSize - containerRef.current.clientWidth / 2 + pixelSize / 2,
+        top: y * pixelSize - containerRef.current.clientHeight / 2 + pixelSize / 2,
+        behavior: 'smooth'
+      });
+    }
+  }, [openPixelData, filledPixels, zoom]);
+
   const handleClearAll = () => {
     if (!openPixelData) return;
     
@@ -560,6 +594,7 @@ export default function App() {
           case 'f': handleFillColor(); break;
           case 'h': handleHint(); break;
           case 's': handleFindPixel(); break;
+          case 'a': handleSmartAssist(); break;
           case 'c': handleClearAll(); break;
           case 'n': selectNextIncompleteColor(); break;
         }
@@ -567,7 +602,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [history, historyIndex, activeTool, selectedColorIdx, openPixelData, filledPixels, selectNextIncompleteColor]);
+  }, [history, historyIndex, activeTool, selectedColorIdx, openPixelData, filledPixels, selectNextIncompleteColor, handleSmartAssist]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -656,6 +691,20 @@ export default function App() {
   }, [openPixelData, filledPixels]);
 
   const completedColorCount = useMemo(() => colorProgress.filter((p) => p.isComplete).length, [colorProgress]);
+  const completionPercent = useMemo(() => {
+    if (!openPixelData || openPixelData.pixels.length === 0) return 0;
+    return Math.round((filledPixels.size / openPixelData.pixels.length) * 100);
+  }, [openPixelData, filledPixels]);
+  const pixelsPerMinute = useMemo(() => {
+    if (!startTime || elapsedTime <= 0) return 0;
+    return Math.max(0, Math.round((filledPixels.size / (elapsedTime / 1000)) * 60));
+  }, [startTime, elapsedTime, filledPixels]);
+  const etaMinutes = useMemo(() => {
+    if (!openPixelData || pixelsPerMinute <= 0) return null;
+    const remaining = openPixelData.pixels.length - filledPixels.size;
+    if (remaining <= 0) return 0;
+    return Math.max(1, Math.round(remaining / pixelsPerMinute));
+  }, [openPixelData, pixelsPerMinute, filledPixels]);
 
   useEffect(() => {
     if (!isLevelComplete) {
@@ -980,6 +1029,48 @@ export default function App() {
             
             <div className="space-y-5">
               <div className="space-y-2">
+                <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Quick Presets</label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={() => {
+                      setGridSize(24);
+                      setColorCount(12);
+                      setUseDithering(false);
+                      setUseSmoothing(true);
+                    }}
+                    className="px-2 py-1.5 text-xs rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
+                    title="Relaxed preset: fewer cells, smooth edges"
+                  >
+                    Relaxed
+                  </button>
+                  <button
+                    onClick={() => {
+                      setGridSize(32);
+                      setColorCount('auto');
+                      setUseDithering(false);
+                      setUseSmoothing(false);
+                    }}
+                    className="px-2 py-1.5 text-xs rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
+                    title="Standard preset balancing detail and speed"
+                  >
+                    Standard
+                  </button>
+                  <button
+                    onClick={() => {
+                      setGridSize(56);
+                      setColorCount(28);
+                      setUseDithering(true);
+                      setUseSmoothing(false);
+                    }}
+                    className="px-2 py-1.5 text-xs rounded-md bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
+                    title="Expert preset: high detail and richer palette"
+                  >
+                    Expert
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
                 <div className="flex justify-between">
                   <label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">Grid Size</label>
                   <span className="text-xs text-zinc-500 font-mono">{gridSize}x{gridSize}</span>
@@ -1107,14 +1198,14 @@ export default function App() {
                 <div className="flex justify-between items-center text-sm">
                   <span className="text-zinc-500 dark:text-zinc-400">Progress</span>
                   <span className="font-mono text-indigo-500 dark:text-indigo-400">
-                    {Math.round((filledPixels.size / openPixelData.pixels.length) * 100)}%
+                    {completionPercent}%
                   </span>
                 </div>
                 <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full mt-2 overflow-hidden">
                   <motion.div 
                     className="h-full bg-indigo-500"
                     initial={{ width: 0 }}
-                    animate={{ width: `${(filledPixels.size / openPixelData.pixels.length) * 100}%` }}
+                    animate={{ width: `${completionPercent}%` }}
                   />
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -1125,6 +1216,21 @@ export default function App() {
                   <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
                     Colors done
                     <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">{completedColorCount}/{openPixelData.palette.length}</div>
+                  </div>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                  <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
+                    Speed
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono flex items-center gap-1">
+                      <Gauge className="w-3.5 h-3.5" />
+                      {pixelsPerMinute}/min
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-300">
+                    ETA
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 font-mono">
+                      {etaMinutes === null ? '--' : `${etaMinutes}m`}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1215,6 +1321,13 @@ export default function App() {
                   title="Find Pixel (Locate next pixel of selected color)"
                 >
                   <Search className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleSmartAssist}
+                  className="p-2 text-zinc-500 hover:text-emerald-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-emerald-400 dark:hover:bg-zinc-800 transition-colors"
+                  title="Smart Assist (jump to the most unfinished color)"
+                >
+                  <Sparkles className="w-4 h-4" />
                 </button>
                 <button
                   onClick={selectNextIncompleteColor}
