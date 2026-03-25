@@ -229,16 +229,22 @@ export default function App() {
   const isValidOpenPixelFormat = (data: unknown): data is OpenPixelFormat => {
     if (!data || typeof data !== 'object') return false;
     const payload = data as Record<string, unknown>;
+    const isIntegerInRange = (value: unknown, min: number, max: number) =>
+      typeof value === 'number' &&
+      Number.isInteger(value) &&
+      Number.isFinite(value) &&
+      value >= min &&
+      value <= max;
 
     if (typeof payload.version !== 'string') return false;
-    if (typeof payload.width !== 'number' || payload.width <= 0) return false;
-    if (typeof payload.height !== 'number' || payload.height <= 0) return false;
+    if (!isIntegerInRange(payload.width, 1, Number.MAX_SAFE_INTEGER)) return false;
+    if (!isIntegerInRange(payload.height, 1, Number.MAX_SAFE_INTEGER)) return false;
     if (!Array.isArray(payload.palette) || !Array.isArray(payload.pixels)) return false;
 
     const paletteValid = payload.palette.every((entry) =>
       Array.isArray(entry) &&
       entry.length === 3 &&
-      entry.every((c) => typeof c === 'number' && c >= 0 && c <= 255)
+      entry.every((c) => isIntegerInRange(c, 0, 255))
     );
     if (!paletteValid) return false;
 
@@ -246,7 +252,7 @@ export default function App() {
     if (payload.pixels.length !== pixelCount) return false;
 
     const maxPaletteIdx = payload.palette.length - 1;
-    return payload.pixels.every((idx) => typeof idx === 'number' && idx >= 0 && idx <= maxPaletteIdx);
+    return payload.pixels.every((idx) => isIntegerInRange(idx, 0, maxPaletteIdx));
   };
 
   const handleOpenPixelImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
